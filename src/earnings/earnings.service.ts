@@ -21,7 +21,7 @@ export class EarningsService {
     const daily = Array.from({ length: days }).map((_, i) => {
       const date = this.startOfDay(days - 1 - i);
       const dayRows = rows.filter(r => r.earned_at >= date && r.earned_at <= this.endOf(date));
-      return { day: date.toLocaleDateString('en-US', { weekday: 'short' }), date: date.toISOString().slice(0, 10), amount: dayRows.reduce((s, r) => s + r.total, 0), deliveries: dayRows.filter(r => r.earning_type === 'delivery').length };
+      return { day: this.istDateLabel(date, { weekday: 'short' }), date: this.istIsoDate(date), amount: dayRows.reduce((s, r) => s + r.total, 0), deliveries: dayRows.filter(r => r.earning_type === 'delivery').length };
     });
     return { period, total_amount: total, display_total: money(total), total_deliveries: rows.filter(r => r.earning_type === 'delivery').length, avg_per_delivery: rows.length ? Math.round(total / rows.length) : 0, daily, breakdown: { base_fares: rows.reduce((s, r) => s + r.base_fare, 0), distance_bonuses: rows.reduce((s, r) => s + r.distance_bonus, 0), surge_bonuses: rows.reduce((s, r) => s + r.surge_bonus, 0), cancellation_compensation: rows.filter(r => r.earning_type === 'cancellation_compensation').reduce((s, r) => s + r.total, 0), total }, payout: { next_payout_day: 'Sunday', estimated_amount: total, bank_masked: bank?.account_number_masked, ifsc: bank?.ifsc_code, upi_id: bank?.upi_id } };
   }
@@ -42,7 +42,22 @@ export class EarningsService {
     const rows = await this.earnings.find({ where: { rider_id: riderId, earned_at: Between(from, to) } });
     return { total: rows.reduce((s, r) => s + r.total, 0), deliveries: rows.filter(r => r.earning_type === 'delivery').length };
   }
-  private startOfDay(daysAgo: number) { const d = new Date(); d.setDate(d.getDate() - daysAgo); d.setHours(0, 0, 0, 0); return d; }
-  private endOfDay(daysAgo: number) { const d = new Date(); d.setDate(d.getDate() - daysAgo); return this.endOf(d); }
-  private endOf(d: Date) { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; }
+  private startOfDay(daysAgo: number) {
+    const nowParts = this.istDateParts(new Date());
+    return new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day - daysAgo, -5, -30, 0, 0));
+  }
+  private endOfDay(daysAgo: number) { return this.endOf(this.startOfDay(daysAgo)); }
+  private endOf(d: Date) { return new Date(d.getTime() + 24 * 60 * 60 * 1000 - 1); }
+  private istDateParts(date: Date) {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+    const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+    return { year: value('year'), month: value('month'), day: value('day') };
+  }
+  private istDateLabel(date: Date, options: Intl.DateTimeFormatOptions) {
+    return new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', ...options }).format(date);
+  }
+  private istIsoDate(date: Date) {
+    const parts = this.istDateParts(date);
+    return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`;
+  }
 }

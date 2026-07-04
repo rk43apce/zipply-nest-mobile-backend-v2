@@ -23,6 +23,7 @@ import { TopupLimitTracker } from './topup-limit.entity';
 import { CustomerOrder } from './customer-order.entity';
 import { OrderEvent } from './order-event.entity';
 import { OrderRating } from './order-rating.entity';
+import { AcceptHint } from './accept-hint.entity';
 
-export const entities = [Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating];
-export { Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating };
+export const entities = [Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint];
+export { Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint };

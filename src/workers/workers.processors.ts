@@ -50,11 +50,22 @@ export class StaleCleanup implements OnModuleInit {
     const keys = await this.redis.keys('rider:status:*');
     for (const key of keys) {
       const st = await this.redis.hgetall(key);
-      if (st.last_seen && Date.now() - Date.parse(st.last_seen) > 120000) {
-        const riderId = key.split(':').pop();
-        if (riderId) await this.redis.zrem('riders:online', riderId);
-        if (st.city && riderId) await this.redis.zrem(`riders:online:${st.city}`, riderId);
-        await this.redis.hset(key, { status: 'offline', current_order_id: '' });
+      if (st.last_seen) {
+        const staleDuration = Date.now() - Date.parse(st.last_seen);
+        // P2-4 FIX: Increase grace period for on_trip riders from 2min to 5min
+        // on_trip = actively delivering, needs more tolerance for network hiccups
+        // busy = waiting for offers, should be more responsive
+        const staleThreshold = st.status === 'on_trip' ? 300000 : 120000;
+        if (staleDuration > staleThreshold) {
+          const riderId = key.split(':').pop();
+          // Only mark as offline if rider is actively 'busy' or 'on_trip' but has gone stale
+          // Never mark 'available' riders as offline — they may be resting between deliveries
+          if (['busy', 'on_trip'].includes(st.status)) {
+            if (riderId) await this.redis.zrem('riders:online', riderId);
+            if (st.city && riderId) await this.redis.zrem(`riders:online:${st.city}`, riderId);
+            await this.redis.hset(key, { status: 'offline', current_order_id: '' });
+          }
+        }
       }
     }
   }
@@ -79,5 +90,86 @@ export class PaymentMaintenance implements OnModuleInit {
       }
       await manager.createQueryBuilder().update(PaymentTransaction).set({ status: 'failed' }).where('status = :status', { status: 'pending' }).andWhere('expires_at < NOW()').execute();
     });
+  }
+}
+
+// P1-2 FIX: Monitor stuck offers that never get acknowledged
+@Injectable()
+export class StuckOffersDetection implements OnModuleInit {
+  constructor(@InjectRepository(CustomerOrder) private orders: Repository<CustomerOrder>, @Inject(REDIS) private redis: Redis) {}
+  async onModuleInit() {
+    // Run every 60 seconds to detect offers stuck for >5 minutes
+    setInterval(() => this.detectStuckOffers().catch(() => undefined), 60000);
+  }
+  async detectStuckOffers() {
+    // Find dispatch offers still pending after 5+ minutes (no accept/reject/timeout)
+    const query = `
+      SELECT do.id, do.order_id, do.riders_offered_count, COUNT(o.id) as pending_count
+      FROM order_dispatches do
+      LEFT JOIN dispatch_offers o ON do.id = o.dispatch_id AND o.status = 'pending'
+      WHERE do.status IN ('offered', 'searching')
+      AND EXTRACT(EPOCH FROM (NOW() - do.started_at)) > 300
+      GROUP BY do.id
+      HAVING COUNT(o.id) > 0
+      LIMIT 20
+    `;
+    
+    try {
+      const stuck = await this.orders.query(query);
+      for (const dispatch of stuck) {
+        // Mark in Redis for monitoring/alerting
+        await this.redis.hset(`stuck:dispatch:${dispatch.id}`, {
+          order_id: dispatch.order_id,
+          stuck_for_seconds: Math.round((Date.now() - new Date(dispatch.started_at).getTime()) / 1000),
+          pending_offers: dispatch.pending_count,
+          total_offered: dispatch.riders_offered_count
+        });
+      }
+    } catch (_) {
+      // Database query failed, skip this cycle
+    }
+  }
+}
+
+// P1-4 FIX: Monitor rides stuck in intermediate states (>30min in assigned/en_route_pickup)
+@Injectable()
+export class StuckRidesMonitoring implements OnModuleInit {
+  constructor(@InjectRepository(CustomerOrder) private orders: Repository<CustomerOrder>, @Inject(REDIS) private redis: Redis) {}
+  async onModuleInit() {
+    // Run every 5 minutes to detect stuck rides
+    setInterval(() => this.detectStuckRides().catch(() => undefined), 300000);
+  }
+  async detectStuckRides() {
+    // Find rides stuck in intermediate states for >30 minutes
+    const query = `
+      SELECT do.id, do.order_id, do.assigned_rider_id, do.status,
+             EXTRACT(EPOCH FROM (NOW() - COALESCE(do.assigned_at, do.started_at))) as stuck_seconds
+      FROM order_dispatches do
+      WHERE do.status IN ('assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit')
+      AND EXTRACT(EPOCH FROM (NOW() - COALESCE(do.assigned_at, do.started_at))) > 1800
+      LIMIT 50
+    `;
+    
+    try {
+      const stuckRides = await this.orders.query(query);
+      for (const ride of stuckRides) {
+        // Flag stuck ride in Redis for admin investigation
+        await this.redis.hset(`stuck:ride:${ride.id}`, {
+          order_id: ride.order_id,
+          rider_id: ride.assigned_rider_id,
+          status: ride.status,
+          stuck_minutes: Math.round(ride.stuck_seconds / 60)
+        });
+        // Emit alert via Redis pub/sub for real-time monitoring
+        await this.redis.publish('alerts:stuck_rides', JSON.stringify({
+          dispatch_id: ride.id,
+          order_id: ride.order_id,
+          status: ride.status,
+          stuck_minutes: Math.round(ride.stuck_seconds / 60)
+        }));
+      }
+    } catch (_) {
+      // Database query failed, skip this cycle
+    }
   }
 }

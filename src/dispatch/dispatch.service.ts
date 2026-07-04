@@ -8,7 +8,7 @@ import { MoreThan, Repository } from 'typeorm';
 import { REDIS } from '../common/redis.provider';
 import { ApiError } from '../common/api-error';
 import { hasValidCoordinates, haversineKm, maskPhone, money } from '../common/utils';
-import { CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning } from '../entities';
+import { AcceptHint, CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning } from '../entities';
 import { OrdersService } from '../orders/orders.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
@@ -44,7 +44,10 @@ export class DispatchService {
     const active = await this.dispatches.findOne({ where: { assigned_rider_id: b.rider_id }, order: { assigned_at: 'DESC' } });
     const onTrip = active && activeTripStatuses.includes(active.status);
     await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg, current_order_id: onTrip ? active.order_id : '' });
-    await this.offerWaitingDispatches();
+    // Only re-match waiting orders if rider is NOT on a trip (i.e., newly available)
+    if (!onTrip) {
+      await this.offerWaitingDispatches();
+    }
     return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, test_location_override: true, online_since: now };
   }
 
@@ -147,7 +150,7 @@ export class DispatchService {
     }
   }
 
-  async accept(offerId: string, riderId: string) {
+  async accept(offerId: string, riderId: string, _idempotencyKey?: string) {
     if (!uuidRegex.test(offerId || '')) throw new ApiError('INVALID_OFFER_ID', 'Valid offer_id is required', HttpStatus.BAD_REQUEST);
     if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
     const offer = await this.offers.findOneBy({ id: offerId });
@@ -157,9 +160,28 @@ export class DispatchService {
       const existing = await this.dispatches.findOneByOrFail({ id: offer.dispatch_id });
       if (existing.assigned_rider_id === riderId) return this.assignmentPayload(existing, offer);
     }
+    // P0-3 FIX: Distinguish between timeout and other non-pending states
+    if (offer.status === 'timeout') throw new ApiError('OFFER_EXPIRED', 'Offer expired', HttpStatus.UNPROCESSABLE_ENTITY);
     if (offer.status !== 'pending') throw new ApiError('OFFER_ALREADY_RESPONDED', 'Offer already responded', HttpStatus.CONFLICT);
     if (offer.expires_at < new Date()) throw new ApiError('OFFER_EXPIRED', 'Offer expired', HttpStatus.UNPROCESSABLE_ENTITY);
     const d = await this.dispatches.findOneByOrFail({ id: offer.dispatch_id });
+    
+    // P0-1 FIX: Validate order is still dispatchable before attempting assignment
+    if (!(await this.isCustomerOrderDispatchable(d))) {
+      await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
+      await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
+      await this.redis.del(`rider:offered:${riderId}`);
+      return { assigned: false, offer_id: offerId, message: 'Order was cancelled' };
+    }
+
+    // P1-5 FIX: Validate rider is still available before assignment
+    const riderStatus = await this.redis.hgetall(`rider:status:${riderId}`);
+    if (!riderStatus || riderStatus.status !== 'busy') {
+      await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
+      await this.redis.del(`rider:offered:${riderId}`);
+      throw new ApiError('RIDER_UNAVAILABLE', 'Rider is no longer available', HttpStatus.CONFLICT);
+    }
+    
     const won = await this.redis.set(`order_lock:${offer.order_id}`, riderId, 'EX', 300, 'NX');
     if (!won) {
       const lockOwner = await this.redis.get(`order_lock:${offer.order_id}`);
@@ -190,6 +212,12 @@ export class DispatchService {
     if (offer) await this.dispatches.increment({ id: offer.dispatch_id }, 'riders_rejected_count', 1);
     await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
     await this.redis.del(`rider:offered:${riderId}`);
+    
+    // P2-1 FIX: Track rejected riders to exclude from next phase
+    if (offer) {
+      await this.redis.sadd(`dispatch:rejected_riders:${offer.dispatch_id}`, riderId);
+    }
+    
     return { offer_id: offerId, message: 'Offer declined' };
   }
 
@@ -246,8 +274,10 @@ export class DispatchService {
     await this.notifyOrder({ order_id: d.order_id, event_type: 'delivered', rider_id: b.rider_id });
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'delivered', message: 'Your order has been delivered!' });
     await this.riders.increment({ id: b.rider_id }, 'total_deliveries', 1);
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '' });
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '', last_seen: now.toISOString() });
     await this.redis.del(`order_lock:${d.order_id}`);
+    // Re-match waiting orders now that rider is available again
+    await this.offerWaitingDispatches();
     return this.deliveredPayload(d, now, total, duration, wait);
   }
 
@@ -282,6 +312,38 @@ export class DispatchService {
     return this.offerPayload(d, offer);
   }
 
+  // P0-2 FIX: Active ride recovery endpoint for app crash/resume
+  async activeRide(riderId: string) {
+    if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
+    const st = await this.reconcileRiderStatus(riderId);
+    // Check if rider has an active order
+    if (!st.current_order_id) throw new ApiError('NO_ACTIVE_RIDE', 'No active ride found', HttpStatus.NOT_FOUND);
+    // Fetch dispatch for current order
+    const d = await this.dispatches.findOneBy({ order_id: st.current_order_id, assigned_rider_id: riderId });
+    if (!d || ['delivered', 'cancelled'].includes(d.status)) throw new ApiError('NO_ACTIVE_RIDE', 'No active ride found', HttpStatus.NOT_FOUND);
+    // Return complete active delivery state
+    return {
+      order_id: d.order_id,
+      dispatch_id: d.id,
+      status: d.status,
+      phase: d.phase,
+      assigned_at: d.assigned_at,
+      customer_id: d.customer_id,
+      pickup_contact_name: d.pickup_contact_name,
+      pickup_contact_phone: d.pickup_contact_phone,
+      pickup_address: d.pickup_address,
+      pickup_lat: d.pickup_lat,
+      pickup_lng: d.pickup_lng,
+      dropoff_address: d.dropoff_address,
+      dropoff_lat: d.dropoff_lat,
+      dropoff_lng: d.dropoff_lng,
+      picked_up_at: d.picked_up_at,
+      delivered_at: d.delivered_at,
+      rider_id: riderId,
+      rider_status: st.status
+    };
+  }
+
   async expireOffers() {
     const expired = await this.offers.find({ where: { status: 'pending' }, take: 100 });
     for (const o of expired.filter(o => o.expires_at <= new Date())) {
@@ -292,7 +354,12 @@ export class DispatchService {
       const pending = await this.offers.count({ where: { dispatch_id: o.dispatch_id, status: 'pending' } });
       if (!pending) {
         const d = await this.dispatches.findOneBy({ id: o.dispatch_id });
-        if (d && d.phase < 4) { await this.dispatches.update(d.id, { phase: d.phase + 1, status: 'searching' }); await this.offerPhase(d.id, []); }
+        if (d && d.phase < 4) {
+          // P2-1 FIX: Pass rejected riders to next phase
+          const rejectedRiders = await this.redis.smembers(`dispatch:rejected_riders:${d.id}`);
+          await this.dispatches.update(d.id, { phase: d.phase + 1, status: 'searching' });
+          await this.offerPhase(d.id, rejectedRiders);
+        }
         else if (d) await this.dispatches.update(d.id, { status: 'no_rider' });
       }
     }

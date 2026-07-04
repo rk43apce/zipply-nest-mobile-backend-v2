@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vida Rider — Live Test UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="topbar">
+    <span>API</span>
+    <input id="api-base" value="http://localhost:3000">
+    <span id="socket-dot" class="dot off"></span>
+    <span id="socket-label">Socket offline</span>
+  </div>
+
+  <main class="shell">
+    <section class="phone">
+      <header class="statusbar">
+        <span>9:41</span>
+        <span class="material-icons-round">battery_full</span>
+      </header>
+      <div id="app"></div>
+    </section>
+
+    <aside class="panel">
+      <div class="panel-head">
+        <strong>Live Events</strong>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+      <div id="log"></div>
+    </aside>
+  </main>
+
+  <script src="http://localhost:3000/ws/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

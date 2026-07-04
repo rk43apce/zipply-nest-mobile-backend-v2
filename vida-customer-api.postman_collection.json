@@ -1,0 +1,251 @@
+{
+  "info": {
+    "_postman_id": "7b4e8270-vida-customer-api",
+    "name": "Vida Customer API",
+    "description": "Customer/user Postman collection for OTP auth, profile, wallet, saved addresses, and order APIs.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{customer_access_token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:3000", "type": "string" },
+    { "key": "customer_mobile", "value": "9871234567", "type": "string" },
+    { "key": "otp", "value": "1234", "type": "string" },
+    { "key": "customer_access_token", "value": "", "type": "string" },
+    { "key": "customer_refresh_token", "value": "", "type": "string" },
+    { "key": "customer_id", "value": "", "type": "string" },
+    { "key": "wallet_id", "value": "", "type": "string" },
+    { "key": "payment_txn_id", "value": "", "type": "string" },
+    { "key": "order_id", "value": "", "type": "string" },
+    { "key": "address_id", "value": "", "type": "string" },
+    { "key": "idempotency_key", "value": "topup_dev_001", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Customer Auth",
+      "item": [
+        {
+          "name": "Send OTP",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/otp/send",
+            "body": { "mode": "raw", "raw": "{\n  \"mobile\": \"{{customer_mobile}}\"\n}" }
+          }
+        },
+        {
+          "name": "Verify OTP",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "type": "text/javascript",
+              "exec": [
+                "const json = pm.response.json();",
+                "if (json.data) {",
+                "  pm.environment.set('customer_access_token', json.data.access_token);",
+                "  pm.environment.set('customer_refresh_token', json.data.refresh_token);",
+                "  if (json.data.customer?.customer_id) pm.environment.set('customer_id', json.data.customer.customer_id);",
+                "  if (json.data.wallet?.wallet_id) pm.environment.set('wallet_id', json.data.wallet.wallet_id);",
+                "}"
+              ]
+            }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/otp/verify",
+            "body": { "mode": "raw", "raw": "{\n  \"mobile\": \"{{customer_mobile}}\",\n  \"otp\": \"{{otp}}\"\n}" }
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.access_token) pm.environment.set('customer_access_token', json.data.access_token);"] }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/token/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{customer_refresh_token}}\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customer Profile",
+      "item": [
+        { "name": "Get Profile", "request": { "method": "GET", "url": "{{base_url}}/api/customer/profile" } },
+        {
+          "name": "Update Profile",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/profile",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Priya Sharma\",\n  \"email\": \"priya@example.com\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Saved Addresses",
+      "item": [
+        { "name": "List Addresses", "request": { "method": "GET", "url": "{{base_url}}/api/customer/addresses" } },
+        {
+          "name": "Create Address",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.id) pm.environment.set('address_id', json.data.id);"] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/addresses",
+            "body": { "mode": "raw", "raw": "{\n  \"label\": \"Home\",\n  \"address\": \"14B, Juhu Scheme, Mumbai\",\n  \"lat\": 19.0728,\n  \"lng\": 72.8826,\n  \"contact_name\": \"Priya Sharma\",\n  \"contact_phone\": \"9871234567\",\n  \"is_default\": true\n}" }
+          }
+        },
+        {
+          "name": "Update Address",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/customer/addresses/{{address_id}}",
+            "body": { "mode": "raw", "raw": "{\n  \"label\": \"Home\",\n  \"address\": \"14B, Juhu Scheme, Mumbai\",\n  \"lat\": 19.0728,\n  \"lng\": 72.8826,\n  \"contact_name\": \"Priya Sharma\",\n  \"contact_phone\": \"9871234567\",\n  \"is_default\": true\n}" }
+          }
+        },
+        { "name": "Delete Address", "request": { "method": "DELETE", "url": "{{base_url}}/api/customer/addresses/{{address_id}}" } }
+      ]
+    },
+    {
+      "name": "Wallet",
+      "item": [
+        { "name": "Get Wallet", "request": { "method": "GET", "url": "{{base_url}}/api/wallet/{{wallet_id}}" } },
+        { "name": "Get Wallet Limits", "request": { "method": "GET", "url": "{{base_url}}/api/wallet/{{wallet_id}}/limits" } },
+        {
+          "name": "Initiate Topup",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.payment_txn_id) pm.environment.set('payment_txn_id', json.data.payment_txn_id);"] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallet/topup/initiate",
+            "body": { "mode": "raw", "raw": "{\n  \"wallet_id\": \"{{wallet_id}}\",\n  \"amount\": 50000,\n  \"idempotency_key\": \"{{idempotency_key}}\"\n}" }
+          }
+        },
+        {
+          "name": "Simulate Razorpay Success",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallet/topup/simulate/{{payment_txn_id}}/success",
+            "body": { "mode": "raw", "raw": "{\n  \"gateway_payment_id\": \"pay_sim_{{$timestamp}}\",\n  \"status\": \"captured\"\n}" }
+          }
+        },
+        {
+          "name": "Simulate Razorpay Failure",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallet/topup/simulate/{{payment_txn_id}}/failure",
+            "body": { "mode": "raw", "raw": "{\n  \"gateway_payment_id\": \"pay_sim_{{$timestamp}}\",\n  \"reason\": \"customer_cancelled\"\n}" }
+          }
+        },
+        {
+          "name": "Razorpay Webhook Captured",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/wallet/topup/webhook/razorpay",
+            "body": { "mode": "raw", "raw": "{\n  \"payment_txn_id\": \"{{payment_txn_id}}\",\n  \"gateway_payment_id\": \"pay_sim_{{$timestamp}}\",\n  \"status\": \"captured\"\n}" }
+          }
+        },
+        { "name": "Get Topup", "request": { "method": "GET", "url": "{{base_url}}/api/wallet/topup/{{payment_txn_id}}" } },
+        { "name": "Wallet Transactions", "request": { "method": "GET", "url": "{{base_url}}/api/wallet/{{wallet_id}}/transactions?page=1&limit=20" } }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "Estimate Order",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/estimate",
+            "body": { "mode": "raw", "raw": "{\n  \"pickup\": { \"lat\": 19.0596, \"lng\": 72.8295 },\n  \"dropoff\": { \"lat\": 19.0728, \"lng\": 72.8826 },\n  \"parcel\": { \"weight_kg\": 2.5 }\n}" }
+          }
+        },
+        {
+          "name": "Create Order - Wallet",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.order_id) pm.environment.set('order_id', json.data.order_id);"] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/create",
+            "body": { "mode": "raw", "raw": "{\n  \"pickup\": {\n    \"lat\": 19.0596,\n    \"lng\": 72.8295,\n    \"address\": \"Cafe Coffee Day, Bandra West, Mumbai\",\n    \"contact_name\": \"Store Manager\",\n    \"contact_phone\": \"9876543210\"\n  },\n  \"dropoff\": {\n    \"lat\": 19.0728,\n    \"lng\": 72.8826,\n    \"address\": \"14B, Juhu Scheme, Mumbai\",\n    \"contact_name\": \"Priya Sharma\",\n    \"contact_phone\": \"9871234567\"\n  },\n  \"parcel\": { \"weight_kg\": 2.5, \"special_notes\": \"Handle with care\" },\n  \"payment_method\": \"wallet\"\n}" }
+          }
+        },
+        {
+          "name": "Create Order - Cash",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.order_id) pm.environment.set('order_id', json.data.order_id);"] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/create",
+            "body": { "mode": "raw", "raw": "{\n  \"pickup\": { \"lat\": 19.0596, \"lng\": 72.8295, \"address\": \"Cafe Coffee Day, Bandra West, Mumbai\", \"contact_name\": \"Store Manager\", \"contact_phone\": \"9876543210\" },\n  \"dropoff\": { \"lat\": 19.0728, \"lng\": 72.8826, \"address\": \"14B, Juhu Scheme, Mumbai\", \"contact_name\": \"Priya Sharma\", \"contact_phone\": \"9871234567\" },\n  \"parcel\": { \"weight_kg\": 2.5, \"special_notes\": \"Handle with care\" },\n  \"payment_method\": \"cash\"\n}" }
+          }
+        },
+        {
+          "name": "Create Order - Online",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": ["const json = pm.response.json();", "if (json.data?.order_id) pm.environment.set('order_id', json.data.order_id);"] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/create",
+            "body": { "mode": "raw", "raw": "{\n  \"pickup\": { \"lat\": 19.0596, \"lng\": 72.8295, \"address\": \"Cafe Coffee Day, Bandra West, Mumbai\", \"contact_name\": \"Store Manager\", \"contact_phone\": \"9876543210\" },\n  \"dropoff\": { \"lat\": 19.0728, \"lng\": 72.8826, \"address\": \"14B, Juhu Scheme, Mumbai\", \"contact_name\": \"Priya Sharma\", \"contact_phone\": \"9871234567\" },\n  \"parcel\": { \"weight_kg\": 2.5, \"special_notes\": \"Handle with care\" },\n  \"payment_method\": \"online\"\n}" }
+          }
+        },
+        { "name": "Confirm Online Payment", "request": { "method": "POST", "url": "{{base_url}}/api/orders/{{order_id}}/online/confirm" } },
+        { "name": "List Orders", "request": { "method": "GET", "url": "{{base_url}}/api/orders?page=1&limit=20" } },
+        { "name": "Get Order", "request": { "method": "GET", "url": "{{base_url}}/api/orders/{{order_id}}" } },
+        { "name": "Get Order Status", "request": { "method": "GET", "url": "{{base_url}}/api/orders/{{order_id}}/status" } },
+        { "name": "Get Order Timeline", "request": { "method": "GET", "url": "{{base_url}}/api/orders/{{order_id}}/timeline" } },
+        {
+          "name": "Cancel Order",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/{{order_id}}/cancel",
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Changed my mind\"\n}" }
+          }
+        },
+        {
+          "name": "Rate Order",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/orders/{{order_id}}/rate",
+            "body": { "mode": "raw", "raw": "{\n  \"delivery_rating\": 5,\n  \"rider_rating\": 4,\n  \"comments\": \"Quick delivery\"\n}" }
+          }
+        }
+      ]
+    }
+  ]
+}

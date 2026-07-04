@@ -1,0 +1,28 @@
+import { Rider } from './rider.entity';
+import { OtpRequest } from './otp-request.entity';
+import { RiderDocument } from './rider-document.entity';
+import { BackgroundCheck } from './background-check.entity';
+import { TrainingProgress } from './training-progress.entity';
+import { QuizAttempt } from './quiz-attempt.entity';
+import { QuizQuestion } from './quiz-question.entity';
+import { BankAccount } from './bank-account.entity';
+import { OrderDispatch } from './order-dispatch.entity';
+import { DispatchOffer } from './dispatch-offer.entity';
+import { DispatchEvent } from './dispatch-event.entity';
+import { RiderEarning } from './rider-earning.entity';
+import { RiderLocation } from './rider-location.entity';
+import { OnboardingEvent } from './onboarding-event.entity';
+import { Customer } from './customer.entity';
+import { CustomerOtpRequest } from './customer-otp.entity';
+import { SavedAddress } from './saved-address.entity';
+import { Wallet } from './wallet.entity';
+import { PaymentTransaction } from './payment-transaction.entity';
+import { WalletTransaction } from './wallet-transaction.entity';
+import { WalletHold } from './wallet-hold.entity';
+import { TopupLimitTracker } from './topup-limit.entity';
+import { CustomerOrder } from './customer-order.entity';
+import { OrderEvent } from './order-event.entity';
+import { OrderRating } from './order-rating.entity';
+
+export const entities = [Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating];
+export { Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating };

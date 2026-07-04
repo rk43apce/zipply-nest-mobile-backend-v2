@@ -4,7 +4,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
-import { In, Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { REDIS } from '../common/redis.provider';
 import { ApiError } from '../common/api-error';
 import { hasValidCoordinates, haversineKm, maskPhone, money } from '../common/utils';
@@ -14,6 +14,9 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 const phaseConfig: any = { 1: [2, 1, 30], 2: [3, 3, 25], 3: [5, 5, 20], 4: [8, 20, 15] };
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const testRiderLocation = { lat: 28.666662, lng: 77.274517 };
+const onlineRidersGeoKey = 'riders:online';
+const testOfferTimeoutSeconds = 120;
 
 @Injectable()
 export class DispatchService {
@@ -33,18 +36,20 @@ export class DispatchService {
   async online(b: any) {
     const rider = await this.riders.findOneBy({ id: b.rider_id });
     if (!rider || rider.onboarding_status !== 'activated') throw new ApiError('RIDER_NOT_ACTIVATED', 'Rider is not activated', HttpStatus.FORBIDDEN);
-    if (!hasValidCoordinates(Number(b.lat), Number(b.lng))) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
+    const location = this.riderLocationForTesting(b);
+    if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
     const now = new Date().toISOString();
-    await this.redis.geoadd(`riders:online:${b.city}`, b.lng, b.lat, b.rider_id);
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', city: b.city, lat: b.lat, lng: b.lng, last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg });
-    await this.offerWaitingDispatches(b.city);
-    return { rider_id: b.rider_id, status: 'available', city: b.city, online_since: now };
+    await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg });
+    await this.offerWaitingDispatches();
+    return { rider_id: b.rider_id, status: 'available', city: b.city, lat: location.lat, lng: location.lng, test_location_override: true, online_since: now };
   }
 
   async offline(riderId: string) {
     const st = await this.redis.hgetall(`rider:status:${riderId}`);
     const pending = await this.redis.get(`rider:offered:${riderId}`);
     if (pending) await this.reject(pending, riderId, 'offline');
+    await this.redis.zrem(onlineRidersGeoKey, riderId);
     if (st.city) await this.redis.zrem(`riders:online:${st.city}`, riderId);
     await this.redis.del(`rider:status:${riderId}`);
     return { rider_id: riderId, status: 'offline', offline_at: new Date().toISOString(), pending_offer_auto_rejected: !!pending };
@@ -52,21 +57,22 @@ export class DispatchService {
 
   async location(b: any) {
     if (await this.redis.get(`rate:location:${b.rider_id}`)) throw new ApiError('RATE_LIMITED', 'Max 1 update per 3 seconds', HttpStatus.TOO_MANY_REQUESTS);
-    if (!hasValidCoordinates(Number(b.lat), Number(b.lng))) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
+    const location = this.riderLocationForTesting(b);
+    if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
     await this.redis.set(`rate:location:${b.rider_id}`, '1', 'EX', 3);
     const now = new Date().toISOString();
     const st = await this.redis.hgetall(`rider:status:${b.rider_id}`);
-    const movedKm = Number.isFinite(Number(st.lat)) && Number.isFinite(Number(st.lng)) ? haversineKm(Number(st.lat), Number(st.lng), Number(b.lat), Number(b.lng)) : Infinity;
+    const movedKm = Number.isFinite(Number(st.lat)) && Number.isFinite(Number(st.lng)) ? haversineKm(Number(st.lat), Number(st.lng), location.lat, location.lng) : Infinity;
     const elapsedMs = Date.now() - Date.parse(st.last_location_persisted_at || st.last_seen || '0');
     if (movedKm < 0.03 && elapsedMs < 15000) {
-      await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: b.lat, lng: b.lng, last_seen: now });
-      return { updated_at: now, skipped_heavy_update: true };
+      await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now });
+      return { updated_at: now, lat: location.lat, lng: location.lng, test_location_override: true, skipped_heavy_update: true };
     }
-    await this.redis.geoadd(`riders:online:${b.city}`, b.lng, b.lat, b.rider_id);
-    await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: b.lat, lng: b.lng, last_seen: now, last_location_persisted_at: now });
-    await this.telemetry.add('location', b);
-    await this.offerWaitingDispatches(b.city);
-    return { updated_at: now };
+    await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
+    await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, last_location_persisted_at: now });
+    await this.telemetry.add('location', { ...b, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: true });
+    await this.offerWaitingDispatches();
+    return { updated_at: now, lat: location.lat, lng: location.lng, test_location_override: true };
   }
 
   async start(b: any) {
@@ -87,9 +93,10 @@ export class DispatchService {
       await this.cancelDispatch(d, 'customer_order_not_dispatchable');
       return;
     }
-    const [radius, limit, timeout] = phaseConfig[d.phase] || [];
+    const [radius, limit, configuredTimeout] = phaseConfig[d.phase] || [];
+    const timeout = testOfferTimeoutSeconds || configuredTimeout;
     if (!radius) { await this.dispatches.update(d.id, { status: 'no_rider' }); return; }
-    const nearby = await this.redis.geosearch(`riders:online:${d.city}`, 'FROMLONLAT', Number(d.pickup_lng), Number(d.pickup_lat), 'BYRADIUS', radius, 'km', 'ASC', 'COUNT', limit * 4);
+    const nearby = await this.redis.geosearch(onlineRidersGeoKey, 'FROMLONLAT', Number(d.pickup_lng), Number(d.pickup_lat), 'BYRADIUS', radius, 'km', 'ASC', 'COUNT', limit * 4);
     const selected: string[] = [];
     for (const riderId of nearby as string[]) {
       if (excluded.includes(riderId) || selected.length >= limit) continue;
@@ -119,18 +126,19 @@ export class DispatchService {
     await this.dispatches.update(d.id, { status: 'offered', riders_offered_count: d.riders_offered_count + selected.length });
   }
 
-  private async offerWaitingDispatches(city: string) {
+  private async offerWaitingDispatches() {
     const waiting = await this.dispatches.find({
       where: [
-        { city, status: 'searching' },
-        { city, status: 'redispatching' },
-        { city, status: 'no_rider' }
+        { status: 'searching' },
+        { status: 'offered' },
+        { status: 'redispatching' },
+        { status: 'no_rider' }
       ],
       order: { started_at: 'DESC' },
       take: 10
     });
     for (const d of waiting) {
-      await this.dispatches.update(d.id, { status: 'searching', phase: 1 });
+      if (d.status !== 'offered') await this.dispatches.update(d.id, { status: 'searching', phase: 1 });
       await this.offerPhase(d.id, []);
     }
   }
@@ -246,11 +254,27 @@ export class DispatchService {
 
   async status(riderId: string) {
     const st = await this.redis.hgetall(`rider:status:${riderId}`);
+    const pendingOffer = await this.currentOffer(riderId);
     if (st.current_order_id) {
       const d = await this.dispatches.findOneBy({ order_id: st.current_order_id });
-      return { rider_id: riderId, status: st.status || 'on_trip', current_order_id: st.current_order_id, active_delivery: d ? this.activeDelivery(d) : null };
+      return { rider_id: riderId, status: st.status || 'on_trip', current_order_id: st.current_order_id, active_delivery: d ? this.activeDelivery(d) : null, pending_offer: pendingOffer };
     }
-    return { rider_id: riderId, status: st.status || 'offline', city: st.city, lat: Number(st.lat), lng: Number(st.lng), last_seen: st.last_seen, current_order_id: null, online_since: st.online_since };
+    return { rider_id: riderId, status: st.status || 'offline', city: st.city, lat: Number(st.lat), lng: Number(st.lng), last_seen: st.last_seen, current_order_id: null, online_since: st.online_since, pending_offer: pendingOffer };
+  }
+
+  async currentOffer(riderId: string) {
+    if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
+    const redisOfferId = await this.redis.get(`rider:offered:${riderId}`);
+    const offer = redisOfferId
+      ? await this.offers.findOneBy({ id: redisOfferId, rider_id: riderId, status: 'pending' })
+      : await this.offers.findOne({
+          where: { rider_id: riderId, status: 'pending', expires_at: MoreThan(new Date()) },
+          order: { offered_at: 'DESC' }
+        });
+    if (!offer || offer.expires_at <= new Date()) return null;
+    const d = await this.dispatches.findOneBy({ id: offer.dispatch_id });
+    if (!d || ['assigned', 'delivered', 'cancelled'].includes(d.status)) return null;
+    return this.offerPayload(d, offer);
   }
 
   async expireOffers() {
@@ -297,6 +321,9 @@ export class DispatchService {
       this.gateway.emitToRider(offer.rider_id, 'offer_cancelled', { offer_id: offer.id, reason });
     }
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'cancelled', message: reason });
+  }
+  private riderLocationForTesting(_body: any) {
+    return testRiderLocation;
   }
   private offerPayload(d: OrderDispatch, o: DispatchOffer) {
     const platformFee = 500;

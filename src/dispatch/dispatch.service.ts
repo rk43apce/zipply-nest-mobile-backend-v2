@@ -17,6 +17,7 @@ const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 const testRiderLocation = { lat: 28.666662, lng: 77.274517 };
 const onlineRidersGeoKey = 'riders:online';
 const testOfferTimeoutSeconds = 120;
+const activeTripStatuses = ['assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit'];
 
 @Injectable()
 export class DispatchService {
@@ -40,9 +41,11 @@ export class DispatchService {
     if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
     const now = new Date().toISOString();
     await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg });
+    const active = await this.dispatches.findOne({ where: { assigned_rider_id: b.rider_id }, order: { assigned_at: 'DESC' } });
+    const onTrip = active && activeTripStatuses.includes(active.status);
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg, current_order_id: onTrip ? active.order_id : '' });
     await this.offerWaitingDispatches();
-    return { rider_id: b.rider_id, status: 'available', city: b.city, lat: location.lat, lng: location.lng, test_location_override: true, online_since: now };
+    return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, test_location_override: true, online_since: now };
   }
 
   async offline(riderId: string) {
@@ -101,16 +104,17 @@ export class DispatchService {
     for (const riderId of nearby as string[]) {
       if (excluded.includes(riderId) || selected.length >= limit) continue;
       const st = await this.redis.hgetall(`rider:status:${riderId}`);
-      if (st.status !== 'available') continue;
-      if (Date.now() - Date.parse(st.last_seen || '0') > 5 * 60000) continue;
-      if (Number(st.max_parcel_weight_kg || 0) < Number(d.parcel_weight_kg)) continue;
+      const clean = await this.reconcileRiderStatus(riderId, st);
+      if (clean.status !== 'available' || clean.current_order_id) continue;
+      if (Date.now() - Date.parse(clean.last_seen || '0') > 5 * 60000) continue;
+      if (Number(clean.max_parcel_weight_kg || 0) < Number(d.parcel_weight_kg)) continue;
       selected.push(riderId);
     }
     if (!selected.length) { await this.dispatches.update(d.id, { phase: d.phase + 1 }); return this.offerPhase(d.id, excluded); }
     for (const riderId of selected) {
       const expires = new Date(Date.now() + timeout * 1000);
       const offer = await this.offers.save({ dispatch_id: d.id, order_id: d.order_id, rider_id: riderId, phase: d.phase, distance_km: d.distance_km, estimated_earnings: d.estimated_earnings, timeout_seconds: timeout, expires_at: expires });
-      await this.redis.hset(`rider:status:${riderId}`, { status: 'busy' });
+      await this.redis.hset(`rider:status:${riderId}`, { status: 'busy', current_order_id: '' });
       await this.redis.set(`rider:offered:${riderId}`, offer.id, 'EX', timeout);
       await this.redis.set(`offer:timer:${offer.id}`, riderId, 'EX', timeout);
       this.gateway.emitToRider(riderId, 'order_offer', this.offerPayload(d, offer));
@@ -161,7 +165,7 @@ export class DispatchService {
       const lockOwner = await this.redis.get(`order_lock:${offer.order_id}`);
       if (lockOwner === riderId && d.assigned_rider_id === riderId) return this.assignmentPayload(d, offer);
       await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
-      await this.redis.hset(`rider:status:${riderId}`, { status: 'available' });
+      await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${riderId}`);
       return { assigned: false, offer_id: offerId, message: 'Order was taken by another rider' };
     }
@@ -169,7 +173,7 @@ export class DispatchService {
     await this.dispatches.update(d.id, { status: 'assigned', assigned_rider_id: riderId, assigned_at: new Date() });
     const others = await this.offers.find({ where: { order_id: d.order_id, status: 'pending' } });
     await this.offers.update({ order_id: d.order_id, status: 'pending' }, { status: 'cancelled' });
-    for (const o of others.filter(o => o.rider_id !== riderId)) { await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available' }); this.gateway.emitToRider(o.rider_id, 'offer_cancelled', { offer_id: o.id, reason: 'assigned_to_other' }); }
+    for (const o of others.filter(o => o.rider_id !== riderId)) { await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' }); this.gateway.emitToRider(o.rider_id, 'offer_cancelled', { offer_id: o.id, reason: 'assigned_to_other' }); }
     await this.redis.hset(`rider:status:${riderId}`, { status: 'on_trip', current_order_id: d.order_id });
     await this.redis.del(`rider:offered:${riderId}`);
     await this.events.save({ dispatch_id: d.id, order_id: d.order_id, event_type: 'rider_assigned', rider_id: riderId, phase: offer.phase });
@@ -184,13 +188,14 @@ export class DispatchService {
     await this.offers.update({ id: offerId, rider_id: riderId }, { status: 'rejected', reason, responded_at: new Date() });
     const offer = await this.offers.findOneBy({ id: offerId });
     if (offer) await this.dispatches.increment({ id: offer.dispatch_id }, 'riders_rejected_count', 1);
-    await this.redis.hset(`rider:status:${riderId}`, { status: 'available' });
+    await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
     await this.redis.del(`rider:offered:${riderId}`);
     return { offer_id: offerId, message: 'Offer declined' };
   }
 
   async transition(orderId: string, riderId: string, from: string | string[], to: string) {
     const d = await this.mustAssigned(orderId, riderId);
+    if (d.status === to) return { order_id: orderId, status: to, already_applied: true };
     if (!(Array.isArray(from) ? from : [from]).includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot transition from current delivery state', HttpStatus.CONFLICT);
     const now = new Date();
     const patch: any = { status: to };
@@ -253,7 +258,7 @@ export class DispatchService {
   }
 
   async status(riderId: string) {
-    const st = await this.redis.hgetall(`rider:status:${riderId}`);
+    const st = await this.reconcileRiderStatus(riderId);
     const pendingOffer = await this.currentOffer(riderId);
     if (st.current_order_id) {
       const d = await this.dispatches.findOneBy({ order_id: st.current_order_id });
@@ -264,13 +269,13 @@ export class DispatchService {
 
   async currentOffer(riderId: string) {
     if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
+    const st = await this.reconcileRiderStatus(riderId);
+    if (st.status !== 'busy' || st.current_order_id) return null;
     const redisOfferId = await this.redis.get(`rider:offered:${riderId}`);
+    if (!redisOfferId) return null;
     const offer = redisOfferId
       ? await this.offers.findOneBy({ id: redisOfferId, rider_id: riderId, status: 'pending' })
-      : await this.offers.findOne({
-          where: { rider_id: riderId, status: 'pending', expires_at: MoreThan(new Date()) },
-          order: { offered_at: 'DESC' }
-        });
+      : null;
     if (!offer || offer.expires_at <= new Date()) return null;
     const d = await this.dispatches.findOneBy({ id: offer.dispatch_id });
     if (!d || ['assigned', 'delivered', 'cancelled'].includes(d.status)) return null;
@@ -281,7 +286,7 @@ export class DispatchService {
     const expired = await this.offers.find({ where: { status: 'pending' }, take: 100 });
     for (const o of expired.filter(o => o.expires_at <= new Date())) {
       await this.offers.update(o.id, { status: 'timeout', responded_at: new Date() });
-      await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available' });
+      await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${o.rider_id}`);
       this.gateway.emitToRider(o.rider_id, 'offer_cancelled', { offer_id: o.id, reason: 'timeout' });
       const pending = await this.offers.count({ where: { dispatch_id: o.dispatch_id, status: 'pending' } });
@@ -297,6 +302,37 @@ export class DispatchService {
     const d = await this.dispatches.findOneBy({ order_id: orderId });
     if (!d || d.assigned_rider_id !== riderId) throw new ApiError('ORDER_NOT_ASSIGNED', 'Rider is not assigned to this order', HttpStatus.NOT_FOUND);
     return d;
+  }
+  private async reconcileRiderStatus(riderId: string, existing?: Record<string, string>) {
+    const key = `rider:status:${riderId}`;
+    const st = existing || await this.redis.hgetall(key);
+    if (!Object.keys(st).length) return st;
+
+    const offered = await this.redis.get(`rider:offered:${riderId}`);
+    if (offered) {
+      const offer = await this.offers.findOneBy({ id: offered, rider_id: riderId, status: 'pending' });
+      if (offer && offer.expires_at > new Date()) {
+        if (st.status !== 'busy' || st.current_order_id) await this.redis.hset(key, { status: 'busy', current_order_id: '' });
+        return { ...st, status: 'busy', current_order_id: '' };
+      }
+      await this.redis.del(`rider:offered:${riderId}`);
+    }
+
+    if (st.current_order_id) {
+      const active = await this.dispatches.findOneBy({ order_id: st.current_order_id, assigned_rider_id: riderId });
+      if (active && activeTripStatuses.includes(active.status)) {
+        if (st.status !== 'on_trip') await this.redis.hset(key, { status: 'on_trip' });
+        return { ...st, status: 'on_trip' };
+      }
+      await this.redis.hset(key, { current_order_id: '' });
+      st.current_order_id = '';
+    }
+
+    if (st.status === 'busy' || st.status === 'on_trip') {
+      await this.redis.hset(key, { status: 'available', current_order_id: '' });
+      return { ...st, status: 'available', current_order_id: '' };
+    }
+    return st;
   }
   private async notifyOrder(event: any) {
     try {
@@ -316,7 +352,7 @@ export class DispatchService {
     const pending = await this.offers.find({ where: { order_id: d.order_id, status: 'pending' } });
     if (pending.length) await this.offers.update({ order_id: d.order_id, status: 'pending' }, { status: 'cancelled', reason, responded_at: new Date() });
     for (const offer of pending) {
-      await this.redis.hset(`rider:status:${offer.rider_id}`, { status: 'available' });
+      await this.redis.hset(`rider:status:${offer.rider_id}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${offer.rider_id}`);
       this.gateway.emitToRider(offer.rider_id, 'offer_cancelled', { offer_id: offer.id, reason });
     }

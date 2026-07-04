@@ -52,8 +52,9 @@ export class StaleCleanup implements OnModuleInit {
       const st = await this.redis.hgetall(key);
       if (st.last_seen && Date.now() - Date.parse(st.last_seen) > 120000) {
         const riderId = key.split(':').pop();
+        if (riderId) await this.redis.zrem('riders:online', riderId);
         if (st.city && riderId) await this.redis.zrem(`riders:online:${st.city}`, riderId);
-        await this.redis.hset(key, { status: 'offline' });
+        await this.redis.hset(key, { status: 'offline', current_order_id: '' });
       }
     }
   }

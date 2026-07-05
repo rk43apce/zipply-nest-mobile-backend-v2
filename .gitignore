@@ -7,7 +7,6 @@ coverage/
 
 # Environment and secrets
 .env
-.env.*
 !.env.example
 *local.postman_environment.json
 

@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
@@ -21,34 +21,23 @@ jobs:
 
             APP_DIR="${{ secrets.APP_DIR }}"
 
-            cd "$APP_DIR"
-
-            echo "Pull latest code..."
-            git fetch origin
-            git reset --hard origin/main
-
-            echo "Prepare env..."
-            if [ ! -f .env.production ]; then
-              echo ".env.production not found"
-              exit 1
+            if [ ! -d "$APP_DIR/.git" ]; then
+              rm -rf "$APP_DIR"
+              git clone https://github.com/${{ github.repository }}.git "$APP_DIR"
             fi
 
-            cp .env.production .env
-            chmod 600 .env
+            cd "$APP_DIR"
 
-            echo "Install dependencies..."
+            git fetch origin main
+            git reset --hard origin/main
+
             npm ci
-
-            echo "Build app..."
             npm run build
 
-            echo "Restart PM2..."
             if pm2 describe zipply-api > /dev/null; then
-              pm2 restart zipply-api --update-env
+              pm2 restart zipply-api
             else
               pm2 start dist/main.js --name zipply-api
             fi
 
             pm2 save
-
-            echo "Deployment completed"

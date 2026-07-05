@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Job } from 'bullmq';
@@ -26,9 +26,28 @@ export class OnboardingProcessor extends WorkerHost {
 
 @Processor('telemetry')
 export class TelemetryProcessor extends WorkerHost {
+  private readonly logger = new Logger(TelemetryProcessor.name);
   constructor(@InjectRepository(RiderLocation) private locations: Repository<RiderLocation>) { super(); }
   async process(job: Job<any>) {
-    await this.locations.save({ rider_id: job.data.rider_id, lat: job.data.lat, lng: job.data.lng, speed: job.data.speed, bearing: job.data.bearing });
+    const saved = await this.locations.save({
+      rider_id: job.data.rider_id,
+      lat: job.data.lat,
+      lng: job.data.lng,
+      accuracy: job.data.accuracy,
+      speed: job.data.speed,
+      bearing: job.data.bearing,
+      gps_timestamp: job.data.gps_timestamp ? new Date(job.data.gps_timestamp) : undefined,
+    });
+    this.logger.log(JSON.stringify({
+      event: 'ZipplyDbLocationUpdated',
+      rider_id: job.data.rider_id,
+      location_id: saved.id,
+      lat: job.data.lat,
+      lng: job.data.lng,
+      accuracy: job.data.accuracy ?? null,
+      gps_timestamp: job.data.gps_timestamp ?? null,
+      recorded_at: saved.recorded_at,
+    }));
   }
 }
 

@@ -5,7 +5,9 @@ export class RiderLocation {
   @Column('uuid') rider_id: string;
   @Column('decimal', { precision: 10, scale: 7 }) lat: number;
   @Column('decimal', { precision: 10, scale: 7 }) lng: number;
+  @Column('decimal', { precision: 7, scale: 2, nullable: true }) accuracy?: number;
   @Column('decimal', { precision: 5, scale: 1, nullable: true }) speed?: number;
   @Column('decimal', { precision: 5, scale: 1, nullable: true }) bearing?: number;
+  @Column({ type: 'timestamp', nullable: true }) gps_timestamp?: Date;
   @Column({ type: 'timestamp', default: () => 'NOW()' }) recorded_at: Date;
 }

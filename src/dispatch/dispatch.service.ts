@@ -14,7 +14,6 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 const phaseConfig: any = { 1: [2, 1, 30], 2: [3, 3, 25], 3: [5, 5, 20], 4: [8, 20, 15] };
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const testRiderLocation = { lat: 28.666662, lng: 77.274517 };
 const onlineRidersGeoKey = 'riders:online';
 const testOfferTimeoutSeconds = 120;
 const activeTripStatuses = ['assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit'];
@@ -39,19 +38,21 @@ export class DispatchService {
   async online(b: any) {
     const rider = await this.riders.findOneBy({ id: b.rider_id });
     if (!rider || rider.onboarding_status !== 'activated') throw new ApiError('RIDER_NOT_ACTIVATED', 'Rider is not activated', HttpStatus.FORBIDDEN);
-    const location = this.riderLocationForTesting(b);
+    const location = this.realRiderLocation(b);
     if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
     const now = new Date().toISOString();
     await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
     const active = await this.findActiveTripForRider(b.rider_id);
     const onTrip = !!active;
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg, current_order_id: onTrip ? active.order_id : '' });
-    this.logDispatch('rider_online', { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', active_order_id: active?.order_id, city: b.city, lat: location.lat, lng: location.lng });
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg, current_order_id: onTrip ? active.order_id : '' });
+    this.logDispatch('ZipplyBackendReceivedRiderLocation', { rider_id: b.rider_id, source: 'online', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, received_at: now });
+    this.logDispatch('ZipplyRedisUpdatedRiderLocation', { rider_id: b.rider_id, redis_key: `rider:status:${b.rider_id}`, geo_key: onlineRidersGeoKey, lat: location.lat, lng: location.lng, updated_at: now });
+    this.logDispatch('rider_online', { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', active_order_id: active?.order_id, city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null });
     // Only re-match waiting orders if rider is NOT on a trip (i.e., newly available)
     if (!onTrip) {
       await this.offerWaitingDispatches();
     }
-    return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, test_location_override: true, online_since: now };
+    return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, online_since: now };
   }
 
   async offline(riderId: string) {
@@ -66,7 +67,7 @@ export class DispatchService {
 
   async location(b: any) {
     if (await this.redis.get(`rate:location:${b.rider_id}`)) throw new ApiError('RATE_LIMITED', 'Max 1 update per 3 seconds', HttpStatus.TOO_MANY_REQUESTS);
-    const location = this.riderLocationForTesting(b);
+    const location = this.realRiderLocation(b);
     if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
     await this.redis.set(`rate:location:${b.rider_id}`, '1', 'EX', 3);
     const now = new Date().toISOString();
@@ -74,15 +75,19 @@ export class DispatchService {
     const clean = await this.reconcileRiderStatus(b.rider_id, st);
     const movedKm = Number.isFinite(Number(clean.lat)) && Number.isFinite(Number(clean.lng)) ? haversineKm(Number(clean.lat), Number(clean.lng), location.lat, location.lng) : Infinity;
     const elapsedMs = Date.now() - Date.parse(clean.last_location_persisted_at || clean.last_seen || '0');
+    this.logDispatch('ZipplyBackendReceivedRiderLocation', { rider_id: b.rider_id, source: 'location_update', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, received_at: now, moved_km: movedKm });
     if (movedKm < 0.03 && elapsedMs < 15000) {
-      await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now });
-      return { updated_at: now, lat: location.lat, lng: location.lng, test_location_override: true, skipped_heavy_update: true };
+      await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now });
+      this.logDispatch('ZipplyRedisUpdatedRiderLocation', { rider_id: b.rider_id, redis_key: `rider:status:${b.rider_id}`, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, updated_at: now, skipped_heavy_update: true });
+      return { updated_at: now, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, skipped_heavy_update: true };
     }
     await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
-    await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: 'true', last_seen: now, last_location_persisted_at: now });
-    await this.telemetry.add('location', { ...b, lat: location.lat, lng: location.lng, original_lat: b.lat, original_lng: b.lng, test_location_override: true });
+    await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now, last_location_persisted_at: now });
+    this.logDispatch('ZipplyRedisUpdatedRiderLocation', { rider_id: b.rider_id, redis_key: `rider:status:${b.rider_id}`, geo_key: onlineRidersGeoKey, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, updated_at: now });
+    await this.telemetry.add('location', { ...b, lat: location.lat, lng: location.lng, accuracy: location.accuracy, gps_timestamp: location.gps_timestamp });
+    this.logDispatch('ZipplyDbLocationUpdateQueued', { rider_id: b.rider_id, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null });
     await this.offerWaitingDispatches();
-    return { updated_at: now, lat: location.lat, lng: location.lng, test_location_override: true };
+    return { updated_at: now, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null };
   }
 
   async start(b: any) {
@@ -135,6 +140,7 @@ export class DispatchService {
         this.logDispatch('rider_eligibility_decision', { dispatch_id: d.id, order_id: d.order_id, rider_id: riderId, eligible: false, reason: 'insufficient_capacity', max_parcel_weight_kg: clean.max_parcel_weight_kg, order_parcel_weight_kg: d.parcel_weight_kg });
         continue;
       }
+      this.logDispatch('ZipplyRiderLocationUsedForMatching', { dispatch_id: d.id, order_id: d.order_id, rider_id: riderId, rider_lat: Number(clean.lat), rider_lng: Number(clean.lng), pickup_lat: Number(d.pickup_lat), pickup_lng: Number(d.pickup_lng), last_seen: clean.last_seen || null });
       this.logDispatch('rider_eligibility_decision', { dispatch_id: d.id, order_id: d.order_id, rider_id: riderId, eligible: true });
       selected.push(riderId);
     }
@@ -479,8 +485,13 @@ export class DispatchService {
     }
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'cancelled', message: reason });
   }
-  private riderLocationForTesting(_body: any) {
-    return testRiderLocation;
+  private realRiderLocation(body: any) {
+    return {
+      lat: Number(body.lat),
+      lng: Number(body.lng),
+      accuracy: Number.isFinite(Number(body.accuracy)) ? Number(body.accuracy) : undefined,
+      gps_timestamp: typeof body.gps_timestamp === 'string' ? body.gps_timestamp : undefined,
+    };
   }
   private sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));

@@ -5,7 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { ApiError } from '../common/api-error';
-import { maskPhone, mobileRegex, money } from '../common/utils';
+import { isEnabled, maskPhone, mobileRegex, money } from '../common/utils';
 import { Customer, CustomerOtpRequest, SavedAddress, Wallet } from '../entities';
 
 @Injectable()
@@ -25,8 +25,9 @@ export class CustomerService {
     if (locked?.locked_until) throw new ApiError('OTP_LOCKED', 'Too many attempts. Try again later', HttpStatus.TOO_MANY_REQUESTS, { locked_until: locked.locked_until.toISOString() });
     const otp = String(Math.floor(1000 + Math.random() * 9000));
     await this.otps.save({ mobile, otp_hash: await bcrypt.hash(otp, 10), expires_at: new Date(Date.now() + 300000) });
-    if ((this.config.get('NODE_ENV') || 'development') !== 'production') console.log(`DEV customer OTP for ${mobile}: ${otp}`);
-    return { message: 'OTP sent', expires_in_seconds: 300, ...((this.config.get('NODE_ENV') || 'development') !== 'production' ? { dev_otp: otp } : {}) };
+    const includeOtp = this.shouldIncludeOtpInResponse();
+    if (includeOtp) console.log(`DEV customer OTP for ${mobile}: ${otp}`);
+    return { message: 'OTP sent', expires_in_seconds: 300, ...(includeOtp ? { dev_otp: otp } : {}) };
   }
 
   async verifyOtp(mobile: string, otp: string) {
@@ -109,5 +110,9 @@ export class CustomerService {
 
   private walletPayload(wallet: Wallet, includeDisplays = false) {
     return { wallet_id: wallet.id, balance: wallet.cached_balance, available_balance: wallet.available_balance, display_balance: money(wallet.cached_balance), ...(includeDisplays ? { display_available: money(wallet.available_balance) } : {}) };
+  }
+
+  private shouldIncludeOtpInResponse() {
+    return (this.config.get('NODE_ENV') || 'development') !== 'production' || isEnabled(this.config.get('OTP_IN_RESPONSE'));
   }
 }

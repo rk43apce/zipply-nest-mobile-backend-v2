@@ -24,6 +24,10 @@ export function hasValidCoordinates(lat: number, lng: number) {
   return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 }
 
+export function isEnabled(value?: string) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+}
+
 export function isAdult(date: string) {
   const dob = new Date(date);
   const now = new Date();

@@ -5,7 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { ApiError } from '../common/api-error';
-import { mobileRegex } from '../common/utils';
+import { isEnabled, mobileRegex } from '../common/utils';
 import { OtpRequest, Rider } from '../entities';
 
 @Injectable()
@@ -26,8 +26,9 @@ export class AuthService {
     }
     const otp = String(Math.floor(1000 + Math.random() * 9000));
     await this.otps.save({ mobile, otp_hash: await bcrypt.hash(otp, 10), expires_at: new Date(Date.now() + 300000) });
-    if ((this.config.get('NODE_ENV') || 'development') !== 'production') console.log(`DEV OTP for ${mobile}: ${otp}`);
-    return { message: 'OTP sent successfully', expires_in_seconds: 300, ...((this.config.get('NODE_ENV') || 'development') !== 'production' ? { dev_otp: otp } : {}) };
+    const includeOtp = this.shouldIncludeOtpInResponse();
+    if (includeOtp) console.log(`DEV OTP for ${mobile}: ${otp}`);
+    return { message: 'OTP sent successfully', expires_in_seconds: 300, ...(includeOtp ? { dev_otp: otp } : {}) };
   }
 
   async verifyOtp(mobile: string, otp: string) {
@@ -66,5 +67,9 @@ export class AuthService {
 
   signAccess(rider: Rider) {
     return this.jwt.sign({ rider_id: rider.id, mobile: rider.mobile, onboarding_status: rider.onboarding_status });
+  }
+
+  private shouldIncludeOtpInResponse() {
+    return (this.config.get('NODE_ENV') || 'development') !== 'production' || isEnabled(this.config.get('OTP_IN_RESPONSE'));
   }
 }

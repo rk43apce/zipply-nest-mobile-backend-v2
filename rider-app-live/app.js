@@ -101,14 +101,14 @@ function connectSocket() {
   socket.on('location_ack', payload => log('socket', 'location_ack', payload));
 }
 
-function renderLogin() {
+function renderLogin(mobile = '9876543200') {
   app.innerHTML = `
     <div class="screen">
       <div class="title">Rider Test UI</div>
       <div class="sub">Login, go online, receive offers, accept, and move delivery states.</div>
       <div class="card">
         <label>Mobile</label>
-        <input id="mobile" value="9876543200" maxlength="10">
+        <input id="mobile" value="${mobile}" maxlength="10">
         <button class="btn primary" onclick="sendOtp()">Send OTP</button>
       </div>
     </div>
@@ -118,14 +118,22 @@ function renderLogin() {
 async function sendOtp() {
   const mobile = document.getElementById('mobile').value;
   const data = await api('POST', '/api/auth/otp/send', { mobile });
+  const devOtp = data.dev_otp || '';
   app.innerHTML = `
     <div class="screen">
       <div class="title">Verify OTP</div>
       <div class="sub">Mobile +91 ${mobile}</div>
       <div class="card">
+        ${devOtp ? `
+          <div style="border:1px solid #bfdbfe; background:#eff6ff; border-radius:12px; padding:12px; margin-bottom:12px; text-align:center;">
+            <div style="font-size:11px; font-weight:800; color:#1d4ed8; text-transform:uppercase;">Test OTP</div>
+            <div style="font-size:28px; font-weight:900; color:#111827; letter-spacing:8px; margin-top:4px;">${devOtp}</div>
+          </div>
+        ` : ''}
         <label>OTP</label>
-        <input id="otp" value="${data.dev_otp || '1234'}" maxlength="4">
+        <input id="otp" value="${devOtp}" maxlength="4">
         <button class="btn primary" onclick="verifyOtp('${mobile}')">Verify</button>
+        <button class="btn ghost" onclick="renderLogin('${mobile}')">Change number</button>
       </div>
     </div>
   `;

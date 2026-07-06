@@ -7,6 +7,7 @@ import * as bcrypt from 'bcryptjs';
 import { ApiError } from '../common/api-error';
 import { isEnabled, mobileRegex } from '../common/utils';
 import { OtpRequest, Rider } from '../entities';
+import { SessionService } from './session.service';
 
 @Injectable()
 export class AuthService {
@@ -14,7 +15,8 @@ export class AuthService {
     @InjectRepository(OtpRequest) private readonly otps: Repository<OtpRequest>,
     @InjectRepository(Rider) private readonly riders: Repository<Rider>,
     private readonly jwt: JwtService,
-    private readonly config: ConfigService
+    private readonly config: ConfigService,
+    private readonly sessions: SessionService
   ) {}
 
   async sendOtp(mobile: string) {
@@ -31,28 +33,47 @@ export class AuthService {
     return { message: 'OTP sent successfully', expires_in_seconds: 300, ...(includeOtp ? { dev_otp: otp } : {}) };
   }
 
-  async verifyOtp(mobile: string, otp: string) {
-    const req = await this.otps.findOne({ where: { mobile, is_verified: false, expires_at: MoreThan(new Date()) }, order: { created_at: 'DESC' } });
-    if (!req) throw new ApiError('OTP_EXPIRED', 'OTP expired or not found', HttpStatus.UNPROCESSABLE_ENTITY);
-    if (req.locked_until && req.locked_until > new Date()) throw new ApiError('OTP_LOCKED', 'Too many attempts. Try again later', HttpStatus.TOO_MANY_REQUESTS, { locked_until: req.locked_until.toISOString() });
-    if (!(await bcrypt.compare(otp || '', req.otp_hash))) {
-      req.attempts += 1;
-      if (req.attempts >= 3) req.locked_until = new Date(Date.now() + 15 * 60000);
+  async verifyOtp(mobile: string, otp: string, deviceId?: string, deviceMeta?: Record<string, any>) {
+    try {
+      const req = await this.otps.findOne({ where: { mobile, is_verified: false, expires_at: MoreThan(new Date()) }, order: { created_at: 'DESC' } });
+      if (!req) throw new ApiError('OTP_EXPIRED', 'OTP expired or not found', HttpStatus.UNPROCESSABLE_ENTITY);
+      if (req.locked_until && req.locked_until > new Date()) throw new ApiError('OTP_LOCKED', 'Too many attempts. Try again later', HttpStatus.TOO_MANY_REQUESTS, { locked_until: req.locked_until.toISOString() });
+      if (!(await bcrypt.compare(otp || '', req.otp_hash))) {
+        req.attempts += 1;
+        if (req.attempts >= 3) req.locked_until = new Date(Date.now() + 15 * 60000);
+        await this.otps.save(req);
+        if (req.locked_until) throw new ApiError('OTP_LOCKED', 'Too many attempts. Try again in 15 minutes', HttpStatus.TOO_MANY_REQUESTS, { locked_until: req.locked_until.toISOString() });
+        throw new ApiError('OTP_INVALID', `Incorrect OTP. ${3 - req.attempts} attempts remaining`, HttpStatus.UNPROCESSABLE_ENTITY);
+      }
+      req.is_verified = true;
       await this.otps.save(req);
-      if (req.locked_until) throw new ApiError('OTP_LOCKED', 'Too many attempts. Try again in 15 minutes', HttpStatus.TOO_MANY_REQUESTS, { locked_until: req.locked_until.toISOString() });
-      throw new ApiError('OTP_INVALID', `Incorrect OTP. ${3 - req.attempts} attempts remaining`, HttpStatus.UNPROCESSABLE_ENTITY);
+      let rider = await this.riders.findOne({ where: { mobile } });
+      const isNew = !rider;
+      if (!rider) rider = await this.riders.save({ mobile, onboarding_status: 'registered' });
+
+      const accessToken = this.signAccess(rider);
+      const tokenHash = this.sessions.generateTokenHash(accessToken);
+      const deviceHash = deviceId ? this.sessions.generateTokenHash(deviceId + JSON.stringify(deviceMeta || {})) : 'unknown';
+
+      // Create session (this will invalidate previous sessions)
+      await this.sessions.createSession(String(rider.id), 'rider', deviceId || 'unknown', deviceHash, tokenHash, deviceMeta?.device_name, deviceMeta?.ip_address);
+
+      // Register device fingerprint
+      if (deviceId && deviceMeta) {
+        await this.sessions.registerDevice(String(rider.id), 'rider', deviceId, deviceMeta);
+      }
+
+      return {
+        access_token: accessToken,
+        refresh_token: this.jwt.sign({ rider_id: rider.id, mobile, type: 'refresh' }, { secret: this.config.get('JWT_REFRESH_SECRET') || 'your-refresh-secret', expiresIn: this.config.get('JWT_REFRESH_EXPIRES_IN') || '30d' }),
+        expires_in: 604800,
+        rider: { rider_id: rider.id, mobile, name: rider.name || null, onboarding_status: rider.onboarding_status, is_new: isNew },
+        previous_device_logged_out: false
+      };
+    } catch (error) {
+      console.error('[OTP_VERIFY_ERROR]', error);
+      throw error;
     }
-    req.is_verified = true;
-    await this.otps.save(req);
-    let rider = await this.riders.findOne({ where: { mobile } });
-    const isNew = !rider;
-    if (!rider) rider = await this.riders.save({ mobile, onboarding_status: 'registered' });
-    return {
-      access_token: this.signAccess(rider),
-      refresh_token: this.jwt.sign({ rider_id: rider.id, mobile, type: 'refresh' }, { secret: this.config.get('JWT_REFRESH_SECRET') || 'your-refresh-secret', expiresIn: this.config.get('JWT_REFRESH_EXPIRES_IN') || '30d' }),
-      expires_in: 604800,
-      rider: { rider_id: rider.id, mobile, name: rider.name || null, onboarding_status: rider.onboarding_status, is_new: isNew }
-    };
   }
 
   async refresh(token: string) {
@@ -63,6 +84,11 @@ export class AuthService {
     } catch {
       throw new ApiError('INVALID_REFRESH_TOKEN', 'Invalid refresh token', HttpStatus.UNAUTHORIZED);
     }
+  }
+
+  async logout(riderId: string) {
+    await this.sessions.invalidateSession(String(riderId), 'rider');
+    return { logged_out: true };
   }
 
   signAccess(rider: Rider) {

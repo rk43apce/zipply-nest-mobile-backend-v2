@@ -45,8 +45,8 @@ export class CustomerService {
     const isNew = !customer;
     if (!customer) customer = await this.customers.save({ mobile, is_verified: true });
     else if (!customer.is_verified) await this.customers.update(customer.id, { is_verified: true });
-    let wallet = await this.wallets.findOneBy({ customer_id: customer.id });
-    if (!wallet) wallet = await this.wallets.save({ customer_id: customer.id, cached_balance: 50000, available_balance: 50000 });
+    let wallet = await this.wallets.findOneBy({ user_id: customer.id, user_type: 'customer' });
+    if (!wallet) wallet = await this.wallets.save({ user_id: customer.id, user_type: 'customer', cached_balance: 50000, available_balance: 50000 });
     return { access_token: this.signAccess(customer), refresh_token: this.signRefresh(customer), expires_in: 604800, customer: { customer_id: customer.id, mobile, name: customer.name || null, is_new: isNew }, wallet: this.walletPayload(wallet) };
   }
 
@@ -54,7 +54,7 @@ export class CustomerService {
     try {
       const payload = this.jwt.verify(refreshToken, { secret: this.config.get('JWT_REFRESH_SECRET') || 'your-refresh-secret' });
       if (payload.type !== 'customer_refresh') throw new Error('bad type');
-      const customer = await this.customers.findOneByOrFail({ id: payload.customer_id });
+      const customer = await this.customers.findOneByOrFail({ id: payload.user_id });
       return { access_token: this.signAccess(customer), expires_in: 604800 };
     } catch {
       throw new ApiError('INVALID_REFRESH_TOKEN', 'Invalid refresh token', HttpStatus.UNAUTHORIZED);
@@ -63,7 +63,7 @@ export class CustomerService {
 
   async profile(customerId: string) {
     const customer = await this.customers.findOneByOrFail({ id: customerId });
-    const wallet = await this.wallets.findOneBy({ customer_id: customerId });
+    const wallet = await this.wallets.findOneBy({ user_id: customerId, user_type: 'customer' });
     return { customer_id: customer.id, mobile: customer.mobile, name: customer.name, email: customer.email, wallet: wallet ? this.walletPayload(wallet, true) : null, created_at: customer.created_at };
   }
 

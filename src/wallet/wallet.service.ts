@@ -3,216 +3,308 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { ApiError } from '../common/api-error';
 import { money } from '../common/utils';
-import { PaymentTransaction, TopupLimitTracker, Wallet, WalletHold, WalletTransaction } from '../entities';
+import { 
+  Wallet, WalletTransaction, PaymentTransaction, WalletHold, TopupLimitTracker,
+  WalletAuditLog, CommissionLedger, TripPayment, BusinessRule
+} from '../entities';
 
 @Injectable()
 export class WalletService {
+  private readonly MAX_RETRIES = 3;
+  
   constructor(
     private dataSource: DataSource,
     @InjectRepository(Wallet) private wallets: Repository<Wallet>,
-    @InjectRepository(PaymentTransaction) private payments: Repository<PaymentTransaction>,
     @InjectRepository(WalletTransaction) private txns: Repository<WalletTransaction>,
+    @InjectRepository(PaymentTransaction) private payments: Repository<PaymentTransaction>,
+    @InjectRepository(WalletHold) private holds: Repository<WalletHold>,
     @InjectRepository(TopupLimitTracker) private limits: Repository<TopupLimitTracker>,
-    @InjectRepository(WalletHold) private holds: Repository<WalletHold>
+    @InjectRepository(WalletAuditLog) private auditLogs: Repository<WalletAuditLog>,
+    @InjectRepository(BusinessRule) private rules: Repository<BusinessRule>
   ) {}
 
-  async get(walletId: string) {
-    const wallet = await this.mustWallet(walletId);
-    return { wallet_id: wallet.id, customer_id: wallet.customer_id, cached_balance: wallet.cached_balance, available_balance: wallet.available_balance, display_balance: money(wallet.cached_balance), display_available: money(wallet.available_balance), status: wallet.status, daily_topup_limit: wallet.daily_topup_limit, monthly_topup_limit: wallet.monthly_topup_limit };
+  // Get wallet balance and status for customer
+  async getCustomerWallet(customerId: string) {
+    try {
+      let wallet = await this.wallets.findOne({ where: { user_id: customerId, user_type: 'customer' } });
+      if (!wallet) {
+        console.log(`[WALLET] Creating new wallet for customer ${customerId}`);
+        // Auto-create wallet on first access
+        wallet = await this.wallets.save({
+          user_id: customerId,
+          user_type: 'customer',
+          currency_code: 'INR',
+          cached_balance: 0,
+          available_balance: 0,
+          status: 'active'
+        });
+        console.log(`[WALLET] Created wallet ID: ${wallet.id}`);
+      }
+      
+      return {
+        wallet_id: wallet.id,
+        customer_id: customerId,
+        cached_balance: wallet.cached_balance,
+        available_balance: wallet.available_balance,
+        display_balance: money(wallet.cached_balance),
+        display_available: money(wallet.available_balance),
+        currency: wallet.currency_code,
+        status: wallet.status
+      };
+    } catch (error) {
+      console.error('[WALLET_ERROR] getCustomerWallet failed:', error);
+      throw error;
+    }
   }
 
-  async getLimits(walletId: string) {
-    const wallet = await this.mustWallet(walletId);
-    const daily = await this.limitUsed(walletId, 'daily');
-    const monthly = await this.limitUsed(walletId, 'monthly');
-    return { daily: this.limitPayload(wallet.daily_topup_limit, daily), monthly: this.limitPayload(wallet.monthly_topup_limit, monthly) };
+  // Get wallet balance and status
+  async getWallet(riderId: string) {
+    try {
+      let wallet = await this.wallets.findOne({ where: { user_id: riderId, user_type: 'rider' } });
+      if (!wallet) {
+        console.log(`[WALLET] Creating new wallet for rider ${riderId}`);
+        // Auto-create wallet on first access
+        wallet = await this.wallets.save({
+          user_id: riderId,
+          user_type: 'rider',
+          currency_code: 'INR',
+          cached_balance: 0,
+          available_balance: 0,
+          status: 'active'
+        });
+        console.log(`[WALLET] Created wallet ID: ${wallet.id}`);
+      }
+      const isBlocked = wallet.cached_balance <= await this.getNegativeThreshold();
+      
+      return {
+        wallet_id: wallet.id,
+        rider_id: riderId,
+        cached_balance: wallet.cached_balance,
+        available_balance: wallet.available_balance,
+        display_balance: money(wallet.cached_balance),
+        display_available: money(wallet.available_balance),
+        currency: wallet.currency_code,
+        status: wallet.status,
+        is_blocked: isBlocked,
+        blocked_reason: isBlocked ? `Balance below threshold (${money(await this.getNegativeThreshold())}). Top up to accept rides.` : null,
+        negative_threshold: await this.getNegativeThreshold(),
+        display_threshold: money(await this.getNegativeThreshold())
+      };
+    } catch (error) {
+      console.error('[WALLET_ERROR] getWallet failed:', error);
+      throw error;
+    }
   }
 
-  async initiateTopup(body: any) {
-    const wallet = await this.mustWallet(body.wallet_id);
-    const amount = Number(body.amount);
-    if (!Number.isInteger(amount) || amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Invalid amount', HttpStatus.BAD_REQUEST);
-    if (wallet.status !== 'active') throw new ApiError('WALLET_FROZEN', 'Wallet is not active', HttpStatus.FORBIDDEN);
-    await this.checkTopupLimits(wallet, amount);
-    if (!body.idempotency_key) throw new ApiError('IDEMPOTENCY_REQUIRED', 'Idempotency key is required', HttpStatus.BAD_REQUEST);
-    const existing = await this.payments.findOneBy({ idempotency_key: body.idempotency_key });
-    if (existing) return this.paymentInitiatedPayload(existing);
-    const payment = await this.payments.save({
-      wallet_id: wallet.id,
-      amount,
-      idempotency_key: body.idempotency_key,
-      gateway_provider: body.gateway_provider || 'razorpay',
-      gateway_order_id: `order_sim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      expires_at: new Date(Date.now() + 3600000),
-      metadata: { checkout_mode: 'simulation', requested_by: body.requested_by || 'customer_app' }
+  // Create wallet for new user (rider or customer)
+  async createWallet(userId: string, userType: string = 'rider', currencyCode = 'INR') {
+    const existing = await this.wallets.findOne({ where: { user_id: userId, user_type: userType } });
+    if (existing) return existing;
+
+    const wallet = await this.wallets.save({
+      user_id: userId,
+      user_type: userType,
+      currency_code: currencyCode,
+      cached_balance: 0,
+      available_balance: 0,
+      status: 'active',
+      kyc_level: 'basic',
+      version: 1
     });
-    return this.paymentInitiatedPayload(payment);
+
+    await this.logAudit(wallet.id, 'system', 'wallet_created', 'wallet', 0, null, { id: wallet.id, user_id: userId, user_type: userType });
+    return wallet;
   }
 
-  async confirmTopup(paymentTxnId: string, body: any = {}) {
-    const gatewayPaymentId = body.gateway_payment_id || `pay_sim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return this.captureGatewayPayment(paymentTxnId, gatewayPaymentId, body.payment_method || 'razorpay_simulated');
-  }
+  // Credit wallet with optimistic locking
+  async creditWallet(walletId: string, amount: number, txnCategory: string, idempotencyKey: string, description?: string, referenceType?: string, referenceId?: string) {
+    if (amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Amount must be positive', HttpStatus.BAD_REQUEST);
 
-  async failTopup(paymentTxnId: string, body: any = {}) {
+    // Check idempotency
+    const existing = await this.txns.findOne({ where: { idempotency_key: idempotencyKey } });
+    if (existing) return { txn_id: existing.id, new_balance: existing.running_balance };
+
     return this.dataSource.transaction(async manager => {
-      const payment = await manager.findOne(PaymentTransaction, { where: { id: paymentTxnId } });
-      if (!payment) throw new ApiError('PAYMENT_NOT_FOUND', 'Payment transaction not found', HttpStatus.NOT_FOUND);
-      if (payment.status === 'captured') throw new ApiError('PAYMENT_ALREADY_CAPTURED', 'Captured payments cannot be failed', HttpStatus.CONFLICT);
-      if (payment.status === 'failed') return this.failedPayload(payment, body.reason || 'payment_failed');
-      if (payment.status !== 'pending') throw new ApiError('PAYMENT_NOT_PENDING', 'Payment is not pending', HttpStatus.CONFLICT);
-      await manager.update(PaymentTransaction, payment.id, {
-        status: 'failed',
-        gateway_payment_id: body.gateway_payment_id,
-        payment_method: body.payment_method || 'razorpay_simulated',
-        metadata: { ...(payment.metadata || {}), failure_reason: body.reason || 'payment_failed' }
-      });
-      payment.status = 'failed';
-      return this.failedPayload(payment, body.reason || 'payment_failed');
+      let wallet = await manager.findOne(Wallet, { where: { id: walletId } });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
+      if (wallet.status === 'frozen') throw new ApiError('WALLET_FROZEN', 'Wallet is frozen', HttpStatus.FORBIDDEN);
+
+      const oldBalance = wallet.cached_balance;
+      const newBalance = oldBalance + amount;
+
+      // Optimistic locking: update with version check
+      const result = await manager.update(
+        Wallet,
+        { id: walletId, version: wallet.version },
+        { cached_balance: newBalance, available_balance: wallet.available_balance + amount, version: wallet.version + 1 }
+      );
+
+      if (result.affected === 0) throw new ApiError('OPTIMISTIC_LOCK_CONFLICT', 'Concurrent update detected, retry', HttpStatus.CONFLICT);
+
+      // Create transaction record
+      const txn = await manager.save(WalletTransaction, {
+        wallet_id: walletId,
+        idempotency_key: idempotencyKey,
+        txn_type: 'credit',
+        txn_category: txnCategory,
+        amount,
+        running_balance: newBalance,
+        description,
+        reference_type: referenceType,
+        reference_id: referenceId,
+        status: 'completed',
+        completed_at: new Date()
+      } as any);
+
+      await this.logAudit(walletId, 'system', 'credit', 'wallet_transaction', 0, { balance: oldBalance }, { balance: newBalance });
+
+      return { txn_id: txn.id, new_balance: newBalance };
     });
   }
 
-  async handleRazorpayWebhook(body: any) {
-    const paymentTxnId = body.payment_txn_id || body.notes?.payment_txn_id;
-    if (!paymentTxnId) throw new ApiError('PAYMENT_TXN_REQUIRED', 'Payment transaction id is required', HttpStatus.BAD_REQUEST);
-    const status = String(body.status || body.event || '').toLowerCase();
-    if (['captured', 'success', 'payment.captured'].includes(status)) {
-      if (!body.gateway_payment_id && !body.razorpay_payment_id) throw new ApiError('GATEWAY_PAYMENT_REQUIRED', 'Gateway payment id is required', HttpStatus.BAD_REQUEST);
-      return this.confirmTopup(paymentTxnId, { gateway_payment_id: body.gateway_payment_id || body.razorpay_payment_id, payment_method: 'razorpay' });
-    }
-    return this.failTopup(paymentTxnId, { gateway_payment_id: body.gateway_payment_id || body.razorpay_payment_id, payment_method: 'razorpay', reason: body.reason || status || 'payment_failed' });
+  // Debit wallet with optimistic locking
+  async debitWallet(walletId: string, amount: number, txnCategory: string, idempotencyKey: string, description?: string, referenceType?: string, referenceId?: string) {
+    if (amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Amount must be positive', HttpStatus.BAD_REQUEST);
+
+    // Check idempotency
+    const existing = await this.txns.findOne({ where: { idempotency_key: idempotencyKey } });
+    if (existing) return { txn_id: existing.id, new_balance: existing.running_balance };
+
+    return this.dataSource.transaction(async manager => {
+      let wallet = await manager.findOne(Wallet, { where: { id: walletId } });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
+      if (wallet.status === 'frozen') throw new ApiError('WALLET_FROZEN', 'Wallet is frozen', HttpStatus.FORBIDDEN);
+
+      const oldBalance = wallet.cached_balance;
+      const newBalance = oldBalance - amount;
+
+      // Optimistic locking: update with version check
+      const result = await manager.update(
+        Wallet,
+        { id: walletId, version: wallet.version },
+        { cached_balance: newBalance, available_balance: Math.max(0, wallet.available_balance - amount), version: wallet.version + 1 }
+      );
+
+      if (result.affected === 0) throw new ApiError('OPTIMISTIC_LOCK_CONFLICT', 'Concurrent update detected, retry', HttpStatus.CONFLICT);
+
+      // Create transaction record
+      const txn = await manager.save(WalletTransaction, {
+        wallet_id: walletId,
+        idempotency_key: idempotencyKey,
+        txn_type: 'debit',
+        txn_category: txnCategory,
+        amount,
+        running_balance: newBalance,
+        description,
+        reference_type: referenceType,
+        reference_id: referenceId,
+        status: 'completed',
+        completed_at: new Date()
+      } as any);
+
+      await this.logAudit(walletId, 'system', 'debit', 'wallet_transaction', 0, { balance: oldBalance }, { balance: newBalance });
+
+      return { txn_id: txn.id, new_balance: newBalance };
+    });
   }
 
-  async payment(paymentTxnId: string) {
-    const p = await this.payments.findOneBy({ id: paymentTxnId });
-    if (!p) throw new ApiError('PAYMENT_NOT_FOUND', 'Payment transaction not found', HttpStatus.NOT_FOUND);
-    return { payment_txn_id: p.id, amount: p.amount, status: p.status, gateway_provider: p.gateway_provider, gateway_order_id: p.gateway_order_id, gateway_payment_id: p.gateway_payment_id, payment_method: p.payment_method, captured_at: p.captured_at, expires_at: p.expires_at };
-  }
+  // Get wallet transactions history
+  async getTransactions(riderId: string, page: number = 1, perPage: number = 20, txnType?: string) {
+    const wallet = await this.findWalletByUser(riderId, 'rider');
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(Math.max(1, perPage), 100);
 
-  async transactions(walletId: string, page: number, limit: number, txnType?: string) {
-    const safePage = Math.max(1, page || 1);
-    const safeLimit = Math.min(Math.max(1, limit || 20), 100);
-    const where: any = { wallet_id: walletId };
+    const where: any = { wallet_id: wallet.id };
     if (txnType) where.txn_type = txnType;
-    const [rows, total] = await this.txns.findAndCount({ where, order: { created_at: 'DESC' }, skip: (safePage - 1) * safeLimit, take: safeLimit });
-    return { transactions: rows.map(t => ({ txn_id: t.id, txn_type: t.txn_type, txn_category: t.txn_category, amount: t.amount, display_amount: `${t.txn_type === 'credit' ? '+' : '-'}${money(t.amount)}`, description: t.description, reference_id: t.reference_id, created_at: t.created_at })), pagination: { page: safePage, limit: safeLimit, total, has_next: safePage * safeLimit < total } };
+
+    const [txns, total] = await this.txns.findAndCount({
+      where,
+      order: { created_at: 'DESC' },
+      skip: (safePage - 1) * safeLimit,
+      take: safeLimit
+    });
+
+    return {
+      transactions: txns.map(t => ({
+        txn_id: t.id,
+        txn_type: t.txn_type,
+        txn_category: t.txn_category,
+        amount: t.amount,
+        display_amount: `${t.txn_type === 'credit' ? '+' : '-'}${money(t.amount)}`,
+        running_balance: t.running_balance,
+        description: t.description,
+        reference_type: t.reference_type,
+        reference_id: t.reference_id,
+        status: t.status,
+        created_at: t.created_at
+      })),
+      pagination: {
+        page: safePage,
+        per_page: safeLimit,
+        total,
+        total_pages: Math.ceil(total / safeLimit)
+      }
+    };
   }
 
-  async placeHold(manager: any, walletId: string, amount: number, orderId: string) {
-    const wallet = await manager.findOneByOrFail(Wallet, { id: walletId });
-    if (wallet.status !== 'active') throw new ApiError('WALLET_FROZEN', 'Wallet is not active', HttpStatus.FORBIDDEN);
-    if (wallet.available_balance < amount) throw new ApiError('INSUFFICIENT_BALANCE', `Wallet balance too low. Add ${money(amount - wallet.available_balance)} to continue`, HttpStatus.UNPROCESSABLE_ENTITY);
-    const hold = await manager.save(WalletHold, { wallet_id: walletId, amount, reason: `Order ${orderId}`, reference_type: 'order', reference_id: orderId, idempotency_key: `order_hold_${orderId}`, expires_at: new Date(Date.now() + 24 * 3600000) });
-    await manager.update(Wallet, walletId, { available_balance: wallet.available_balance - amount, version: wallet.version + 1 });
-    return hold;
+  // Check if rider is eligible to accept rides
+  async checkRiderEligibility(riderId: string) {
+    const wallet = await this.findWalletByUser(riderId, 'rider');
+    const threshold = await this.getNegativeThreshold();
+    const isBlocked = wallet.cached_balance <= threshold;
+
+    return {
+      can_accept_rides: !isBlocked,
+      wallet_balance: wallet.cached_balance,
+      is_blocked: isBlocked,
+      blocked_reason: isBlocked ? `Wallet balance below threshold (${money(threshold)})` : null,
+      ...(isBlocked && {
+        action_required: 'topup',
+        minimum_topup_needed: Math.max(0, threshold - wallet.cached_balance + 100),
+        display_minimum: money(Math.max(0, threshold - wallet.cached_balance + 100))
+      })
+    };
   }
 
-  async captureHold(manager: any, holdId: string, orderId: string, amount: number) {
-    const hold = await manager.findOneBy(WalletHold, { id: holdId });
-    if (!hold || hold.status !== 'active') return;
-    const wallet = await manager.findOneByOrFail(Wallet, { id: hold.wallet_id });
-    const running = wallet.cached_balance - amount;
-    const txn = await manager.save(WalletTransaction, { wallet_id: wallet.id, txn_type: 'debit', txn_category: 'hold_capture', amount, running_balance: running, description: `Order ${orderId}`, reference_type: 'order', reference_id: orderId });
-    await manager.update(Wallet, wallet.id, { cached_balance: running, version: wallet.version + 1 });
-    await manager.update(WalletHold, hold.id, { status: 'captured', capture_txn_id: txn.id, captured_at: new Date() });
+  // Admin freeze wallet
+  async freezeWallet(walletId: string, reason?: string) {
+    await this.wallets.update(walletId, { status: 'frozen' });
+    await this.logAudit(walletId, 'admin', 'wallet_frozen', 'wallet', 0, { status: 'active' }, { status: 'frozen', reason });
+    return { status: 'frozen' };
   }
 
-  async releaseHold(manager: any, holdId: string, orderId: string, fee = 0) {
-    const hold = await manager.findOneBy(WalletHold, { id: holdId });
-    if (!hold || hold.status !== 'active') return { refund: 0 };
-    const wallet = await manager.findOneByOrFail(Wallet, { id: hold.wallet_id });
-    const refund = hold.amount - fee;
-    if (fee > 0) {
-      await manager.save(WalletTransaction, { wallet_id: wallet.id, txn_type: 'debit', txn_category: 'cancellation_fee', amount: fee, running_balance: wallet.cached_balance - fee, description: `Cancellation fee: Order ${orderId}`, reference_type: 'order', reference_id: orderId });
-      await manager.update(Wallet, wallet.id, { cached_balance: wallet.cached_balance - fee, available_balance: wallet.available_balance + refund, version: wallet.version + 1 });
-    } else {
-      await manager.update(Wallet, wallet.id, { available_balance: wallet.available_balance + refund, version: wallet.version + 1 });
-    }
-    await manager.update(WalletHold, hold.id, { status: 'released', released_at: new Date() });
-    return { refund };
+  // Admin unfreeze wallet
+  async unfreezeWallet(walletId: string) {
+    await this.wallets.update(walletId, { status: 'active' });
+    await this.logAudit(walletId, 'admin', 'wallet_unfrozen', 'wallet', 0, { status: 'frozen' }, { status: 'active' });
+    return { status: 'active' };
   }
 
-  private async mustWallet(walletId: string) {
-    const wallet = await this.wallets.findOneBy({ id: walletId });
+  // Helper: Find wallet by user ID and type
+  private async findWalletByUser(userId: string, userType: string) {
+    const wallet = await this.wallets.findOne({ where: { user_id: userId, user_type: userType } });
     if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
     return wallet;
   }
 
-  private async checkTopupLimits(wallet: Wallet, amount: number) {
-    const daily = await this.limitUsed(wallet.id, 'daily');
-    const monthly = await this.limitUsed(wallet.id, 'monthly');
-    if (daily + amount > wallet.daily_topup_limit) throw new ApiError('DAILY_LIMIT_EXCEEDED', 'Daily top-up limit exceeded', HttpStatus.UNPROCESSABLE_ENTITY);
-    if (monthly + amount > wallet.monthly_topup_limit) throw new ApiError('MONTHLY_LIMIT_EXCEEDED', 'Monthly top-up limit exceeded', HttpStatus.UNPROCESSABLE_ENTITY);
-  }
-
-  private async limitUsed(walletId: string, periodType: 'daily' | 'monthly') {
-    const row = await this.limits.findOneBy({ wallet_id: walletId, period_type: periodType, period_start: this.periodStart(periodType) });
-    return row?.amount_used || 0;
-  }
-
-  private async incrementLimit(manager: any, walletId: string, periodType: 'daily' | 'monthly', amount: number) {
-    const period_start = this.periodStart(periodType);
-    const row = await manager.findOneBy(TopupLimitTracker, { wallet_id: walletId, period_type: periodType, period_start });
-    if (row) await manager.update(TopupLimitTracker, row.id, { amount_used: row.amount_used + amount });
-    else await manager.insert(TopupLimitTracker, { wallet_id: walletId, period_type: periodType, period_start, amount_used: amount });
-  }
-
-  private periodStart(periodType: 'daily' | 'monthly') {
-    const d = new Date();
-    if (periodType === 'monthly') d.setDate(1);
-    return d.toISOString().slice(0, 10);
-  }
-
-  private limitPayload(limit: number, used: number) {
-    return { limit, used, remaining: Math.max(0, limit - used), display_limit: money(limit), display_used: money(used), display_remaining: money(Math.max(0, limit - used)) };
-  }
-
-  private paymentInitiatedPayload(p: PaymentTransaction) {
-    return {
-      payment_txn_id: p.id,
-      amount: p.amount,
-      status: p.status,
-      gateway_provider: p.gateway_provider,
-      gateway_order_id: p.gateway_order_id,
-      gateway_checkout_data: {
-        key: 'rzp_test_simulated',
-        order_id: p.gateway_order_id,
-        amount: p.amount,
-        currency: 'INR',
-        name: 'Vida',
-        description: `Add ${money(p.amount)} to wallet`,
-        callback_url: '/api/wallet/topup/webhook/razorpay',
-        simulation: true
-      },
-      expires_at: p.expires_at
-    };
-  }
-
-  private capturedPayload(payment: PaymentTransaction, wallet: Wallet) {
-    return { payment_txn_id: payment.id, status: 'captured', gateway_payment_id: payment.gateway_payment_id, amount_credited: payment.amount, new_balance: wallet.cached_balance, display_new_balance: money(wallet.cached_balance) };
-  }
-
-  private failedPayload(payment: PaymentTransaction, reason: string) {
-    return { payment_txn_id: payment.id, status: 'failed', amount_credited: 0, reason };
-  }
-
-  private async captureGatewayPayment(paymentTxnId: string, gatewayPaymentId: string, paymentMethod: string) {
-    return this.dataSource.transaction(async manager => {
-      const payment = await manager.findOne(PaymentTransaction, { where: { id: paymentTxnId } });
-      if (!payment) throw new ApiError('PAYMENT_NOT_FOUND', 'Payment transaction not found', HttpStatus.NOT_FOUND);
-      const wallet = await manager.findOneByOrFail(Wallet, { id: payment.wallet_id });
-      if (payment.status === 'captured') return this.capturedPayload(payment, wallet);
-      if (payment.status !== 'pending') throw new ApiError('PAYMENT_NOT_PENDING', 'Payment is not pending', HttpStatus.CONFLICT);
-      if (payment.expires_at && payment.expires_at.getTime() < Date.now()) throw new ApiError('PAYMENT_EXPIRED', 'Payment order expired. Please initiate a new top-up.', HttpStatus.CONFLICT);
-      const newBalance = wallet.cached_balance + payment.amount;
-      await manager.update(PaymentTransaction, payment.id, { status: 'captured', gateway_payment_id: gatewayPaymentId, captured_at: new Date(), payment_method: paymentMethod });
-      await manager.insert(WalletTransaction, { wallet_id: wallet.id, txn_type: 'credit', txn_category: 'topup', amount: payment.amount, running_balance: newBalance, description: `Top-up via ${payment.gateway_provider}`, reference_type: 'payment_transaction', reference_id: payment.id });
-      await manager.update(Wallet, wallet.id, { cached_balance: newBalance, available_balance: wallet.available_balance + payment.amount, version: wallet.version + 1 });
-      await this.incrementLimit(manager, wallet.id, 'daily', payment.amount);
-      await this.incrementLimit(manager, wallet.id, 'monthly', payment.amount);
-      payment.status = 'captured';
-      payment.gateway_payment_id = gatewayPaymentId;
-      return this.capturedPayload(payment, { ...wallet, cached_balance: newBalance, available_balance: wallet.available_balance + payment.amount } as Wallet);
+  // Helper: Get negative balance threshold from business rules
+  private async getNegativeThreshold(): Promise<number> {
+    const rule = await this.rules.findOne({
+      where: { rule_key: 'rider_negative_balance_threshold', is_active: true }
     });
+    return rule ? parseInt(rule.rule_value) : -10000;
+  }
+
+  // Helper: Log audit trail
+  private async logAudit(walletId: string, actorType: string, action: string, entityType: string, entityId: number, oldState?: any, newState?: any) {
+    await this.auditLogs.save({
+      wallet_id: walletId,
+      actor_type: actorType,
+      action,
+      entity_type: entityType,
+      entity_id: entityId,
+      old_state: oldState,
+      new_state: newState
+    } as any);
   }
 }

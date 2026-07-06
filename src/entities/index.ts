@@ -24,6 +24,16 @@ import { CustomerOrder } from './customer-order.entity';
 import { OrderEvent } from './order-event.entity';
 import { OrderRating } from './order-rating.entity';
 import { AcceptHint } from './accept-hint.entity';
+import { TransactionLink } from './transaction-link.entity';
+import { WalletAuditLog } from './wallet-audit-log.entity';
+import { RefundRequest } from './refund-request.entity';
+import { TripPayment } from './trip-payment.entity';
+import { CommissionLedger } from './commission-ledger.entity';
+import { BusinessRule } from './business-rule.entity';
+import { FraudFlag } from './fraud-flag.entity';
+import { DeviceFingerprint } from './device-fingerprint.entity';
+import { UserActiveSession } from './user-active-session.entity';
+import { RiderWithdrawal } from './rider-withdrawal.entity';
 
-export const entities = [Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint];
-export { Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint };
+export const entities = [Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint, TransactionLink, WalletAuditLog, RefundRequest, TripPayment, CommissionLedger, BusinessRule, FraudFlag, DeviceFingerprint, UserActiveSession, RiderWithdrawal];
+export { Rider, OtpRequest, RiderDocument, BackgroundCheck, TrainingProgress, QuizAttempt, QuizQuestion, BankAccount, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, OnboardingEvent, Customer, CustomerOtpRequest, SavedAddress, Wallet, PaymentTransaction, WalletTransaction, WalletHold, TopupLimitTracker, CustomerOrder, OrderEvent, OrderRating, AcceptHint, TransactionLink, WalletAuditLog, RefundRequest, TripPayment, CommissionLedger, BusinessRule, FraudFlag, DeviceFingerprint, UserActiveSession, RiderWithdrawal };

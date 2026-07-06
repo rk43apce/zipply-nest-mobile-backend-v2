@@ -6,11 +6,12 @@ import { ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
-import { OtpRequest, Rider } from '../entities';
+import { SessionService } from './session.service';
+import { OtpRequest, Rider, UserActiveSession, DeviceFingerprint } from '../entities';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([OtpRequest, Rider]),
+    TypeOrmModule.forFeature([OtpRequest, Rider, UserActiveSession, DeviceFingerprint]),
     PassportModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -20,8 +21,8 @@ import { OtpRequest, Rider } from '../entities';
       })
     })
   ],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, SessionService],
   controllers: [AuthController],
-  exports: [AuthService]
+  exports: [AuthService, SessionService]
 })
 export class AuthModule {}

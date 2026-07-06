@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
@@ -12,6 +12,7 @@ import { CustomerModule } from './customer/customer.module';
 import { WalletModule } from './wallet/wallet.module';
 import { OrdersModule } from './orders/orders.module';
 import { entities } from './entities';
+import { SessionValidationMiddleware } from './auth/session-validation.middleware';
 
 @Module({
   imports: [
@@ -42,4 +43,8 @@ import { entities } from './entities';
     WorkersModule
   ]
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(SessionValidationMiddleware).forRoutes('api');
+  }
+}

@@ -43,12 +43,13 @@ export class OrdersService {
     let holdId: string | undefined;
     let paymentStatus = paymentMethod === 'cash' ? 'collect_on_delivery' : paymentMethod === 'online' ? 'payment_pending' : 'held';
     const order = await this.dataSource.transaction(async manager => {
-      if (paymentMethod === 'wallet') {
-        const wallet = await manager.findOneBy(Wallet, { customer_id: customerId });
-        if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
-        const hold = await this.walletService.placeHold(manager, wallet.id, pricing.total, orderId);
-        holdId = hold.id;
-      }
+      // TODO: Wallet hold implementation - moved to WalletModule
+      // if (paymentMethod === 'wallet') {
+      //   const wallet = await manager.findOneBy(Wallet, { user_id: customerId });
+      //   if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
+      //   const hold = await this.walletService.placeHold(manager, wallet.id, pricing.total, orderId);
+      //   holdId = hold.id;
+      // }
       const status = paymentMethod === 'online' ? 'payment_pending' : 'confirmed';
       const saved = await manager.save(CustomerOrder, {
         order_id: orderId, customer_id: customerId, idempotency_key: idempotencyKey, status, pickup_lat: body.pickup.lat, pickup_lng: body.pickup.lng, pickup_address: body.pickup.address, pickup_contact_name: body.pickup.contact_name, pickup_contact_phone: body.pickup.contact_phone,
@@ -110,7 +111,8 @@ export class OrdersService {
     const fee = this.cancelFee(order.status);
     let refund = 0;
     await this.dataSource.transaction(async manager => {
-      if (order.hold_id && order.payment_method === 'wallet') refund = (await this.walletService.releaseHold(manager, order.hold_id, orderId, fee)).refund;
+      if (order.hold_id && order.payment_method === 'wallet') refund = 0; // TODO: Move to wallet module
+      // refund = (await this.walletService.releaseHold(manager, order.hold_id, orderId, fee)).refund;
       await manager.update(CustomerOrder, order.id, { status: 'cancelled', cancellation_fee: fee, cancelled_at: new Date(), cancel_reason: reason });
       await manager.save(OrderEvent, { order_id: orderId, event_type: 'order_cancelled', title: 'Order Cancelled', description: reason || 'Cancelled by customer' });
     });
@@ -142,7 +144,7 @@ export class OrdersService {
     if (event.event_type === 'delivered') {
       patch.status = 'delivered'; patch.delivered_at = new Date();
       await this.dataSource.transaction(async manager => {
-        if (order.hold_id && order.payment_method === 'wallet') await this.walletService.captureHold(manager, order.hold_id, order.order_id, order.total_amount);
+        if (order.hold_id && order.payment_method === 'wallet') {} // await this.walletService.captureHold(manager, order.hold_id, order.order_id, order.total_amount);
         await manager.update(CustomerOrder, order.id, patch);
         await manager.save(OrderEvent, { order_id: order.order_id, event_type: 'delivered', title: 'Delivered', description: 'Order delivered' });
       });

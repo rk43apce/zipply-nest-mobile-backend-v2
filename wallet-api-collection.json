@@ -1,0 +1,691 @@
+{
+  "info": {
+    "name": "Vida Rider Wallet API Collection",
+    "description": "Complete API collection for testing wallet endpoints",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Send OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mobile\": \"9876543210\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/auth/otp/send",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "auth",
+                "otp",
+                "send"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Verify OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mobile\": \"9876543210\",\n  \"otp\": \"1234\",\n  \"device_id\": \"device_uuid_123\",\n  \"device_meta\": {\n    \"device_name\": \"Samsung Galaxy S21\",\n    \"model\": \"SM-G991B\",\n    \"os\": \"Android 13\",\n    \"app_version\": \"2.1.0\",\n    \"screen_resolution\": \"1080x2400\"\n  }\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/auth/otp/verify",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "auth",
+                "otp",
+                "verify"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rider_id\": \"{{rider_id}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/auth/logout",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "auth",
+                "logout"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet - Balance",
+      "item": [
+        {
+          "name": "Get Wallet Balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Check Rider Eligibility",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/eligibility",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "eligibility"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet - Top-Up",
+      "item": [
+        {
+          "name": "Initiate Top-Up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 50000,\n  \"gateway\": \"razorpay\",\n  \"idempotency_key\": \"topup_{{rider_id}}_{{$timestamp}}_{{$randomInt}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/topup/initiate",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "topup",
+                "initiate"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Confirm Top-Up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_txn_id\": \"{{payment_txn_id}}\",\n  \"gateway_payment_id\": \"pay_sim_{{$timestamp}}_abc123\",\n  \"gateway_signature\": \"d4a8f2e1b3c5a7d9e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/topup/confirm",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "topup",
+                "confirm"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet - Withdrawal",
+      "item": [
+        {
+          "name": "Get Withdrawal Info",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/withdraw/info",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "withdraw",
+                "info"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Initiate Withdrawal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 20000,\n  \"payout_method\": \"upi\",\n  \"idempotency_key\": \"withdrawal_{{rider_id}}_{{$timestamp}}_{{$randomInt}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/withdraw",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "withdraw"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Withdrawal Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/withdraw/{{withdrawal_id}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "withdraw",
+                "{{withdrawal_id}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet - Transactions",
+      "item": [
+        {
+          "name": "Get Transactions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/transactions?page=1&per_page=20&type=all",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "per_page",
+                  "value": "20"
+                },
+                {
+                  "key": "type",
+                  "value": "all"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet - Cash Payment",
+      "item": [
+        {
+          "name": "Get Active Cash Trip",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/active-cash",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "active-cash"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Confirm Cash Collection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "X-Device-Id",
+                "value": "device_uuid_123"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"cash_confirm_{{trip_id}}_{{$timestamp}}\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/{{rider_id}}/{{trip_id}}/confirm-cash",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "{{rider_id}}",
+                "{{trip_id}}",
+                "confirm-cash"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Wallet Management",
+      "item": [
+        {
+          "name": "Freeze Wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Suspicious activity detected\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/admin/freeze/{{wallet_id}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "admin",
+                "freeze",
+                "{{wallet_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Unfreeze Wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/admin/unfreeze/{{wallet_id}}",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "admin",
+                "unfreeze",
+                "{{wallet_id}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Business Rules",
+      "item": [
+        {
+          "name": "Get All Business Rules",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/admin/business-rules",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "admin",
+                "business-rules"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Business Rule",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/admin/business-rules/commission_rate",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "admin",
+                "business-rules",
+                "commission_rate"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update Business Rule",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rule_value\": \"2500\",\n  \"value_type\": \"int\"\n}"
+            },
+            "url": {
+              "raw": "http://localhost:3000/api/rider/wallet/admin/business-rules/commission_rate",
+              "protocol": "http",
+              "host": [
+                "localhost"
+              ],
+              "port": "3000",
+              "path": [
+                "api",
+                "rider",
+                "wallet",
+                "admin",
+                "business-rules",
+                "commission_rate"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "rider_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "payment_txn_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "withdrawal_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "trip_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "wallet_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "admin_token",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

@@ -17,6 +17,11 @@ export class Rider {
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 100 }) acceptance_rate: number;
   @Column({ default: 0 }) cancellation_score: number;
   @Column({ type: 'timestamp', nullable: true }) activated_at?: Date;
+  @Column({ type: 'text', nullable: true }) fcm_token?: string;
+  @Column({ nullable: true, length: 20 }) device_platform?: string;
+  @Column({ nullable: true, length: 20 }) app_type?: string;
+  @Column({ nullable: true, length: 100 }) device_id?: string;
+  @Column({ type: 'timestamp', nullable: true }) device_token_updated_at?: Date;
   @CreateDateColumn({ type: 'timestamp' }) created_at: Date;
   @UpdateDateColumn({ type: 'timestamp' }) updated_at: Date;
 }

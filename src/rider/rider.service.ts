@@ -1,4 +1,4 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
@@ -15,6 +15,8 @@ const modules = [
 
 @Injectable()
 export class RiderService {
+  private readonly logger = new Logger(RiderService.name);
+
   constructor(
     @InjectRepository(Rider) private riders: Repository<Rider>,
     @InjectRepository(RiderDocument) private docs: Repository<RiderDocument>,
@@ -145,6 +147,48 @@ export class RiderService {
         submitted_at: bank.created_at
       } : null,
       has_bank_account: !!bank
+    };
+  }
+
+  async updateDeviceToken(riderId: string, body: any) {
+    await this.mustRider(riderId);
+    const token = body?.fcm_token?.toString();
+    const platform = body?.platform?.toString() || 'android';
+    const appType = body?.app_type?.toString() || 'rider';
+    const deviceId = body?.device_id?.toString() || null;
+
+    if (!token || token.length < 20) {
+      throw new ApiError('DEVICE_TOKEN_INVALID', 'Invalid device token', HttpStatus.BAD_REQUEST);
+    }
+    if (platform !== 'android') {
+      throw new ApiError('DEVICE_PLATFORM_INVALID', 'Invalid device platform', HttpStatus.BAD_REQUEST);
+    }
+    if (appType !== 'rider') {
+      throw new ApiError('APP_TYPE_INVALID', 'Invalid app type', HttpStatus.BAD_REQUEST);
+    }
+
+    const updatedAt = new Date();
+    await this.riders.update(riderId, {
+      fcm_token: token,
+      device_platform: platform,
+      app_type: appType,
+      device_id: deviceId || undefined,
+      device_token_updated_at: updatedAt,
+    });
+    this.logger.log(JSON.stringify({
+      event: 'ZipplyRiderDeviceTokenUpdated',
+      rider_id: riderId,
+      platform,
+      app_type: appType,
+      device_id: deviceId,
+      token_suffix: token.slice(-6),
+      updated_at: updatedAt.toISOString(),
+    }));
+    return {
+      rider_id: riderId,
+      platform,
+      app_type: appType,
+      device_token_updated_at: updatedAt,
     };
   }
 

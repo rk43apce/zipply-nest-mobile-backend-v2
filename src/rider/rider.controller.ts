@@ -24,6 +24,7 @@ export class RiderController {
   @Post('training/module/update') updateModule(@Req() req: any, @Body() body: any) { return this.riders.updateModule(req.user.rider_id, body.module_id, body.status); }
   @Post('bank/submit') bank(@Req() req: any, @Body() body: any) { return this.riders.submitBank(req.user.rider_id, body); }
   @Get('account-details') accountDetails(@Req() req: any, @Query('rider_id') riderId?: string) { return this.riders.accountDetails(riderId || req.user.rider_id); }
+  @Post('device-token') deviceToken(@Req() req: any, @Body() body: any) { return this.riders.updateDeviceToken(req.user.rider_id, body); }
   @Post('activate') activate(@Req() req: any) { return this.riders.activate(req.user.rider_id); }
   @Get('onboarding/status/:riderId') onboarding(@Param('riderId') id: string) { return this.riders.onboardingStatus(id); }
 }

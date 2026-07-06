@@ -21,35 +21,45 @@ export class TopUpService {
 
   // Initiate top-up: create payment order
   async initiateTopUp(riderId: string, amount: number, gateway: string = 'razorpay', idempotencyKey: string) {
-    if (amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Amount must be positive', HttpStatus.BAD_REQUEST);
-    if (!idempotencyKey) throw new ApiError('IDEMPOTENCY_REQUIRED', 'Idempotency key required', HttpStatus.BAD_REQUEST);
+    try {
+      if (amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Amount must be positive', HttpStatus.BAD_REQUEST);
+      if (!idempotencyKey) throw new ApiError('IDEMPOTENCY_REQUIRED', 'Idempotency key required', HttpStatus.BAD_REQUEST);
 
-    const wallet = await this.wallets.findOne({ where: { user_id: riderId as any, user_type: 'rider' } });
-    if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
-    if (wallet.status === 'frozen') throw new ApiError('WALLET_FROZEN', 'Wallet is frozen', HttpStatus.FORBIDDEN);
+      const wallet = await this.wallets.findOne({ where: { user_id: riderId as any, user_type: 'rider' } });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
+      if (wallet.status === 'frozen') throw new ApiError('WALLET_FROZEN', 'Wallet is frozen', HttpStatus.FORBIDDEN);
 
-    // Check topup limits
-    await this.checkTopupLimits(wallet, amount);
+      // Check topup limits
+      await this.checkTopupLimits(wallet, amount);
 
-    // Check idempotency
-    const existing = await this.payments.findOne({ where: { idempotency_key: idempotencyKey } });
-    if (existing) return this.paymentInitiatedResponse(existing);
+      // Check idempotency
+      const existing = await this.payments.findOne({ where: { idempotency_key: idempotencyKey } });
+      if (existing) return this.paymentInitiatedResponse(existing);
 
-    // Create payment transaction
-    const razorpayOrderId = `order_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const payment = await this.payments.save({
-      wallet_id: wallet.id,
-      idempotency_key: idempotencyKey,
-      gateway_provider: gateway,
-      gateway_order_id: razorpayOrderId,
-      direction: 'inbound',
-      amount,
-      currency_code: wallet.currency_code,
-      status: 'initiated',
-      expires_at: new Date(Date.now() + 3600000) // 1 hour expiry
-    } as any);
+      // Create payment transaction
+      const razorpayOrderId = `order_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      const payment = await this.payments.save({
+        wallet_id: wallet.id,
+        idempotency_key: idempotencyKey,
+        gateway_provider: gateway,
+        gateway_order_id: razorpayOrderId,
+        amount,
+        currency_code: wallet.currency_code,
+        status: 'pending',
+        expires_at: new Date(Date.now() + 3600000) // 1 hour expiry
+      } as any);
 
-    return this.paymentInitiatedResponse(payment);
+      return this.paymentInitiatedResponse(payment);
+    } catch (error) {
+      console.error('[TOPUP_INITIATE_ERROR]', {
+        riderId,
+        amount,
+        gateway,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      throw error;
+    }
   }
 
   // Confirm top-up: verify signature and credit wallet
@@ -67,7 +77,7 @@ export class TopUpService {
         return this.paymentConfirmedResponse(payment, newWallet);
       }
 
-      if (payment.status !== 'initiated' && payment.status !== 'pending') {
+      if (payment.status !== 'pending') {
         throw new ApiError('PAYMENT_INVALID_STATE', `Cannot confirm payment in status: ${payment.status}`, HttpStatus.CONFLICT);
       }
 
@@ -120,12 +130,11 @@ export class TopUpService {
       });
 
       // Update payment transaction
-      await manager.update(PaymentTransaction, payment.id, {
-        status: 'captured',
-        gateway_payment_id: gatewayPaymentId,
-        gateway_signature: gatewaySignature,
-        captured_at: new Date()
-      });
+      payment.status = 'captured';
+      payment.gateway_payment_id = gatewayPaymentId;
+      payment.metadata = { ...payment.metadata, gateway_signature: gatewaySignature };
+      payment.captured_at = new Date();
+      await manager.save(payment);
 
       // Update topup limits
       await this.incrementLimits(manager, (wallet.id as any as string), payment.amount);
@@ -159,18 +168,18 @@ export class TopUpService {
 
   // Check topup limits
   private async checkTopupLimits(wallet: Wallet, amount: number) {
-    const dailyKey = new Date().toISOString().slice(0, 10);
-    const monthlyKey = new Date().toISOString().slice(0, 7);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     const dailyUsed = await this.limits.findOne({ 
-      where: { wallet_id: wallet.id, period_type: 'daily', period_key: dailyKey }
+      where: { wallet_id: wallet.id as any, period_type: 'daily', period_start: today as any }
     });
-    const dailyTotal = (dailyUsed?.total_amount || 0) + amount;
+    const dailyTotal = (dailyUsed?.amount_used || 0) + amount;
 
     const monthlyUsed = await this.limits.findOne({
-      where: { wallet_id: wallet.id, period_type: 'monthly', period_key: monthlyKey }
+      where: { wallet_id: wallet.id as any, period_type: 'monthly' }
     });
-    const monthlyTotal = (monthlyUsed?.total_amount || 0) + amount;
+    const monthlyTotal = (monthlyUsed?.amount_used || 0) + amount;
 
     if (dailyTotal > wallet.daily_topup_limit) {
       throw new ApiError('DAILY_LIMIT_EXCEEDED', `Daily top-up limit exceeded`, HttpStatus.UNPROCESSABLE_ENTITY);
@@ -182,40 +191,40 @@ export class TopUpService {
 
   // Increment topup limits
   private async incrementLimits(manager: any, walletId: string, amount: number) {
-    const dailyKey = new Date().toISOString().slice(0, 10);
-    const monthlyKey = new Date().toISOString().slice(0, 7);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     let dailyUsed = await manager.findOne(TopupLimitTracker, {
-      where: { wallet_id: walletId as any, period_type: 'daily', period_key: dailyKey }
+      where: { wallet_id: walletId as any, period_type: 'daily', period_start: today as any }
     });
     if (dailyUsed) {
-      dailyUsed.total_amount += amount;
-      dailyUsed.txn_count += 1;
+      dailyUsed.amount_used += amount;
       await manager.save(dailyUsed);
     } else {
       await manager.save(TopupLimitTracker, {
         wallet_id: walletId,
         period_type: 'daily',
-        period_key: dailyKey,
-        total_amount: amount,
-        txn_count: 1
+        period_start: today,
+        amount_used: amount
       });
     }
 
+    const monthlyDate = new Date();
+    monthlyDate.setDate(1);
+    monthlyDate.setHours(0, 0, 0, 0);
+
     let monthlyUsed = await manager.findOne(TopupLimitTracker, {
-      where: { wallet_id: walletId as any, period_type: 'monthly', period_key: monthlyKey }
+      where: { wallet_id: walletId as any, period_type: 'monthly', period_start: monthlyDate as any }
     });
     if (monthlyUsed) {
-      monthlyUsed.total_amount += amount;
-      monthlyUsed.txn_count += 1;
+      monthlyUsed.amount_used += amount;
       await manager.save(monthlyUsed);
     } else {
       await manager.save(TopupLimitTracker, {
         wallet_id: walletId,
         period_type: 'monthly',
-        period_key: monthlyKey,
-        total_amount: amount,
-        txn_count: 1
+        period_start: monthlyDate,
+        amount_used: amount
       });
     }
   }

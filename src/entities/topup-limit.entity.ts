@@ -1,14 +1,12 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Unique, UpdateDateColumn } from 'typeorm';
+import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
 
-@Unique(['wallet_id', 'period_type', 'period_key'])
+@Unique(['wallet_id', 'period_type', 'period_start'])
 @Index('idx_tlt_wallet', ['wallet_id'])
 @Entity('topup_limits_tracker')
 export class TopupLimitTracker {
-  @PrimaryGeneratedColumn('increment') id: number;
-  @Column('bigint') wallet_id: string;
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column('uuid') wallet_id: string;
   @Column({ length: 10 }) period_type: string; // 'daily', 'monthly'
-  @Column({ length: 10 }) period_key: string; // YYYY-MM-DD or YYYY-MM
-  @Column('bigint', { default: 0 }) total_amount: number;
-  @Column({ default: 0 }) txn_count: number;
-  @UpdateDateColumn({ type: 'timestamp' }) updated_at: Date;
+  @Column('date') period_start: Date; // Date for daily or YYYY-MM for monthly
+  @Column({ type: 'integer', default: 0 }) amount_used: number;
 }

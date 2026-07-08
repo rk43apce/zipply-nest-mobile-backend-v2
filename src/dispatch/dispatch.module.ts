@@ -6,9 +6,10 @@ import { DispatchService } from './dispatch.service';
 import { redisProvider } from '../common/redis.provider';
 import { CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning, RiderLocation } from '../entities';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Rider, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, CustomerOrder]), BullModule.registerQueue({ name: 'telemetry' }, { name: 'dispatch-timeouts' }), RealtimeModule],
+  imports: [TypeOrmModule.forFeature([Rider, OrderDispatch, DispatchOffer, DispatchEvent, RiderEarning, RiderLocation, CustomerOrder]), BullModule.registerQueue({ name: 'telemetry' }, { name: 'dispatch-timeouts' }), RealtimeModule, NotificationsModule],
   providers: [DispatchService, redisProvider],
   controllers: [DispatchController],
   exports: [DispatchService]

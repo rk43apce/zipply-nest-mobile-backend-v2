@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { config as loadEnv } from 'dotenv';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -8,6 +9,9 @@ import { EnvelopeInterceptor } from './common/envelope.interceptor';
 import { ApiExceptionFilter } from './common/api-exception.filter';
 import { requestLoggerMiddleware } from './common/request-logger.middleware';
 import { RedisIoAdapter } from './realtime/redis-io.adapter';
+
+loadEnv({ path: '.env.production', override: true });
+loadEnv({ path: '.env', override: true });
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);

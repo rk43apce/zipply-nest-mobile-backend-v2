@@ -2,6 +2,7 @@ import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
+import { join } from 'path';
 import { AuthModule } from './auth/auth.module';
 import { RiderModule } from './rider/rider.module';
 import { DispatchModule } from './dispatch/dispatch.module';
@@ -16,7 +17,10 @@ import { SessionValidationMiddleware } from './auth/session-validation.middlewar
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: [join(__dirname, '..', '.env.production'), join(__dirname, '..', '.env')],
+    }),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

@@ -28,6 +28,11 @@ function createService(overrides: Record<string, any> = {}) {
     redis as any,
     {} as any,
     {} as any,
+    {
+      sendOrderOffer: jest.fn(),
+      sendOfferCancelled: jest.fn(),
+      sendOrderAssigned: jest.fn(),
+    } as any,
     {} as any,
   );
 

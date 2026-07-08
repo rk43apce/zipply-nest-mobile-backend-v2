@@ -2,6 +2,7 @@ import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 import { Repository } from 'typeorm';
@@ -11,6 +12,7 @@ import { hasValidCoordinates, haversineKm, maskPhone, money } from '../common/ut
 import { AcceptHint, CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning } from '../entities';
 import { OrdersService } from '../orders/orders.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { NotificationService } from '../notifications/notification.service';
 
 const phaseConfig: any = { 1: [2, 1, 30], 2: [3, 3, 25], 3: [5, 5, 20], 4: [8, 20, 15] };
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -32,6 +34,7 @@ export class DispatchService {
     @Inject(REDIS) private redis: Redis,
     @InjectQueue('telemetry') private telemetry: Queue,
     private gateway: RealtimeGateway,
+    private notifications: NotificationService,
     private moduleRef: ModuleRef
   ) {}
 
@@ -63,6 +66,89 @@ export class DispatchService {
     if (st.city) await this.redis.zrem(`riders:online:${st.city}`, riderId);
     await this.redis.del(`rider:status:${riderId}`);
     return { rider_id: riderId, status: 'offline', offline_at: new Date().toISOString(), pending_offer_auto_rejected: !!pending };
+  }
+
+  async testFcm(b: any) {
+    const riderId = b?.rider_id?.toString();
+    if (!riderId) throw new ApiError('RIDER_ID_REQUIRED', 'rider_id is required', HttpStatus.BAD_REQUEST);
+
+    const rider = await this.riders.findOneBy({ id: riderId });
+    if (!rider) throw new ApiError('RIDER_NOT_FOUND', 'Rider not found', HttpStatus.NOT_FOUND);
+
+    const offerId = b?.offer_id?.toString() || randomUUID();
+    const orderId = b?.order_id?.toString() || randomUUID();
+    const timeoutSeconds = Number(b?.timeout_seconds || 120);
+    const displayEarnings = b?.display_earnings?.toString() || '₹25.00';
+    const displayCustomerFare = b?.display_customer_fare?.toString() || '₹30.00';
+    const displayPlatformFee = b?.display_platform_fee?.toString() || '₹5.00';
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + timeoutSeconds * 1000).toISOString();
+
+    const payload = {
+      type: 'order_offer',
+      offer_id: offerId,
+      order_id: orderId,
+      expires_at: expiresAt,
+      timeout_seconds: timeoutSeconds,
+      payload: {
+        offer_id: offerId,
+        order_id: orderId,
+        pickup: {
+          lat: Number(b?.pickup_lat ?? 19.076),
+          lng: Number(b?.pickup_lng ?? 72.8777),
+          address: b?.pickup_address?.toString() || 'Test pickup location',
+          contact_name: b?.pickup_contact_name?.toString() || 'Test Pickup',
+          contact_phone: b?.pickup_contact_phone?.toString() || '9999999999',
+        },
+        dropoff: {
+          lat: Number(b?.dropoff_lat ?? 19.088),
+          lng: Number(b?.dropoff_lng ?? 72.8877),
+          address: b?.dropoff_address?.toString() || 'Test dropoff location',
+          contact_name: b?.dropoff_contact_name?.toString() || 'Test Dropoff',
+          contact_phone_masked: b?.dropoff_contact_phone_masked?.toString() || '******9999',
+        },
+        distance_km: Number(b?.distance_km ?? 2.4),
+        estimated_earnings: Number(b?.estimated_earnings ?? 2500),
+        display_earnings: displayEarnings,
+        customer_fare: Number(b?.customer_fare ?? 3000),
+        display_customer_fare: displayCustomerFare,
+        platform_fee: Number(b?.platform_fee ?? 500),
+        display_platform_fee: displayPlatformFee,
+        timeout_seconds: timeoutSeconds,
+        expires_at: expiresAt,
+        server_sent_at: now.toISOString(),
+        special_notes: b?.special_notes?.toString() || 'Manual FCM test',
+        parcel_weight_kg: Number(b?.parcel_weight_kg ?? 2),
+        source: 'manual_test',
+      },
+    };
+
+    const fcmResult = await this.notifications.sendOrderOffer(rider.fcm_token, payload);
+    this.logDispatch('manual_fcm_test_sent', {
+      rider_id: riderId,
+      offer_id: offerId,
+      order_id: orderId,
+      has_token: !!rider.fcm_token,
+      fcm_attempted: fcmResult.attempted,
+      fcm_sent: fcmResult.sent,
+      reason: fcmResult.reason,
+      message_id: fcmResult.message_id,
+      error: fcmResult.error,
+    });
+
+    return {
+      rider_id: riderId,
+      offer_id: offerId,
+      order_id: orderId,
+      has_token: !!rider.fcm_token,
+      notification_type: 'order_offer',
+      attempted: fcmResult.attempted,
+      sent: fcmResult.sent,
+      reason: fcmResult.reason,
+      message_id: fcmResult.message_id,
+      error: fcmResult.error,
+      expires_at: expiresAt,
+    };
   }
 
   async location(b: any) {
@@ -152,8 +238,7 @@ export class DispatchService {
       await this.redis.hset(`rider:status:${riderId}`, { status: 'busy', current_order_id: '' });
       await this.redis.set(`rider:offered:${riderId}`, offer.id, 'EX', timeout);
       await this.redis.set(`offer:timer:${offer.id}`, riderId, 'EX', timeout);
-      const emitResult = this.gateway.emitToRider(riderId, 'order_offer', this.offerPayload(d, offer));
-      this.logDispatch('socket_emit_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, event: 'order_offer', ...emitResult });
+      await this.flashOfferToRider(riderId, d, offer);
     }
     this.gateway.emitToCustomer(d.customer_id, 'rider_offer_sent', {
       order_id: d.order_id,
@@ -238,7 +323,7 @@ export class DispatchService {
     await this.dispatches.update(d.id, { status: 'assigned', assigned_rider_id: riderId, assigned_at: new Date() });
     const others = await this.offers.find({ where: { order_id: d.order_id, status: 'pending' } });
     await this.offers.update({ order_id: d.order_id, status: 'pending' }, { status: 'cancelled' });
-    for (const o of others.filter(o => o.rider_id !== riderId)) { await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' }); this.gateway.emitToRider(o.rider_id, 'offer_cancelled', { offer_id: o.id, reason: 'assigned_to_other' }); }
+    for (const o of others.filter(o => o.rider_id !== riderId)) { await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' }); await this.cancelOfferFlash(o.rider_id, { offer_id: o.id, reason: 'assigned_to_other' }); }
     await this.redis.hset(`rider:status:${riderId}`, { status: 'on_trip', current_order_id: d.order_id });
     await this.redis.del(`rider:offered:${riderId}`);
     await this.events.save({ dispatch_id: d.id, order_id: d.order_id, event_type: 'rider_assigned', rider_id: riderId, phase: offer.phase });
@@ -247,7 +332,7 @@ export class DispatchService {
     if (idempotencyKey) {
       await this.redis.set(`accept:idempotency:${idempotencyKey}`, JSON.stringify(payload), 'EX', 300);
     }
-    this.gateway.emitToRider(riderId, 'order_assigned_confirmed', payload);
+    await this.confirmAssignmentToRider(riderId, payload);
     this.gateway.emitToCustomer(d.customer_id, 'rider_assigned', payload);
     return payload;
   }
@@ -265,6 +350,17 @@ export class DispatchService {
     }
     
     return { offer_id: offerId, message: 'Offer declined' };
+  }
+
+  async offerAck(offerId: string, riderId: string, source = 'fcm', receivedAt?: string) {
+    if (!uuidRegex.test(offerId || '')) throw new ApiError('INVALID_OFFER_ID', 'Valid offer_id is required', HttpStatus.BAD_REQUEST);
+    if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
+    const offer = await this.offers.findOneBy({ id: offerId, rider_id: riderId });
+    if (!offer) throw new ApiError('OFFER_NOT_FOUND', 'Offer not found', HttpStatus.NOT_FOUND);
+    const ackedAt = receivedAt || new Date().toISOString();
+    await this.events.save({ dispatch_id: offer.dispatch_id, order_id: offer.order_id, event_type: 'offer_received', rider_id: riderId, phase: offer.phase, details: { source, received_at: ackedAt, offer_status: offer.status } });
+    this.logDispatch('rider_offer_ack_received', { dispatch_id: offer.dispatch_id, order_id: offer.order_id, offer_id: offerId, rider_id: riderId, source, received_at: ackedAt });
+    return { offer_id: offerId, rider_id: riderId, acked: true };
   }
 
   async transition(orderId: string, riderId: string, from: string | string[], to: string) {
@@ -396,7 +492,7 @@ export class DispatchService {
       await this.offers.update(o.id, { status: 'timeout', responded_at: new Date() });
       await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${o.rider_id}`);
-      this.gateway.emitToRider(o.rider_id, 'offer_cancelled', { offer_id: o.id, reason: 'timeout' });
+      await this.cancelOfferFlash(o.rider_id, { offer_id: o.id, reason: 'timeout' });
       const pending = await this.offers.count({ where: { dispatch_id: o.dispatch_id, status: 'pending' } });
       if (!pending) {
         const d = await this.dispatches.findOneBy({ id: o.dispatch_id });
@@ -469,6 +565,38 @@ export class DispatchService {
       return;
     }
   }
+  private async flashOfferToRider(riderId: string, d: OrderDispatch, offer: DispatchOffer) {
+    const payload = this.offerPayload(d, offer);
+    const rider = await this.riders.findOneBy({ id: riderId });
+    const fcmResult = await this.notifications.sendOrderOffer(rider?.fcm_token, payload);
+    this.logDispatch('fcm_offer_flash_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, fcm_attempted: fcmResult.attempted, fcm_sent: fcmResult.sent, reason: fcmResult.reason, error: fcmResult.error, message_id: fcmResult.message_id });
+    if (this.shouldEmitSocket(fcmResult)) {
+      const emitResult = this.gateway.emitToRider(riderId, 'order_offer', payload);
+      this.logDispatch('socket_emit_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, event: 'order_offer', ...emitResult });
+    }
+  }
+  private async cancelOfferFlash(riderId: string, payload: Record<string, any>) {
+    const rider = await this.riders.findOneBy({ id: riderId });
+    const fcmResult = await this.notifications.sendOfferCancelled(rider?.fcm_token, payload);
+    this.logDispatch('fcm_offer_cancel_attempted', { rider_id: riderId, offer_id: payload.offer_id, reason: payload.reason, fcm_attempted: fcmResult.attempted, fcm_sent: fcmResult.sent, error: fcmResult.error });
+    if (this.shouldEmitSocket(fcmResult)) {
+      this.gateway.emitToRider(riderId, 'offer_cancelled', payload);
+    }
+  }
+  private async confirmAssignmentToRider(riderId: string, payload: Record<string, any>) {
+    const rider = await this.riders.findOneBy({ id: riderId });
+    const fcmResult = await this.notifications.sendOrderAssigned(rider?.fcm_token, payload);
+    this.logDispatch('fcm_assignment_confirm_attempted', { rider_id: riderId, offer_id: payload.offer_id, order_id: payload.order_id, fcm_attempted: fcmResult.attempted, fcm_sent: fcmResult.sent, error: fcmResult.error });
+    if (this.shouldEmitSocket(fcmResult)) {
+      this.gateway.emitToRider(riderId, 'order_assigned_confirmed', payload);
+    }
+  }
+  private shouldEmitSocket(fcmResult: { sent: boolean }) {
+    const mode = (process.env.DISPATCH_OFFER_DELIVERY_MODE || 'dual').toLowerCase();
+    if (mode === 'fcm') return !fcmResult.sent;
+    if (mode === 'socket') return true;
+    return true;
+  }
   private async isCustomerOrderDispatchable(d: OrderDispatch) {
     if (!d.customer_id) return true;
     const order = await this.customerOrders.findOneBy({ order_id: d.order_id });
@@ -481,7 +609,7 @@ export class DispatchService {
     for (const offer of pending) {
       await this.redis.hset(`rider:status:${offer.rider_id}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${offer.rider_id}`);
-      this.gateway.emitToRider(offer.rider_id, 'offer_cancelled', { offer_id: offer.id, reason });
+      await this.cancelOfferFlash(offer.rider_id, { offer_id: offer.id, reason });
     }
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'cancelled', message: reason });
   }

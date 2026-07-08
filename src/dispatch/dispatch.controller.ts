@@ -12,6 +12,8 @@ export class DispatchController {
   @Post('start') start(@Body() b: any) { return this.dispatch.start(b); }
   @Post('accept') accept(@Body() b: any) { return this.dispatch.accept(b.offer_id, b.rider_id, b.idempotency_key); }
   @Post('reject') reject(@Body() b: any) { return this.dispatch.reject(b.offer_id, b.rider_id, b.reason); }
+  @Post('offer-ack') offerAck(@Body() b: any) { return this.dispatch.offerAck(b.offer_id, b.rider_id, b.source, b.received_at); }
+  @Post('test-fcm') testFcm(@Body() b: any) { return this.dispatch.testFcm(b); }
   @Post('en-route-pickup') enRoute(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'assigned', 'en_route_pickup'); }
   @Post('arrived-pickup') arrived(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, ['assigned', 'en_route_pickup'], 'arrived_pickup'); }
   @Post('picked-up') picked(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'arrived_pickup', 'picked_up'); }

@@ -9,6 +9,7 @@ coverage/
 .env
 !.env.example
 *local.postman_environment.json
+*firebase-adminsdk*.json
 
 # Runtime data
 logs/

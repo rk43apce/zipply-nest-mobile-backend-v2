@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Entity Schema Sync Check",
+      "trigger": "PreToolUse",
+      "description": "Verifies all entities match database schema before allowing commits to entity files",
+      "matcher": "str_replace|fs_write",
+      "action": {
+        "type": "command",
+        "command": "bash /Users/rajesh/Workspace/zipply-mobile-app-dev/backend/scripts/verify-entity-schema-sync.sh",
+        "timeout": 30
+      }
+    }
+  ]
+}

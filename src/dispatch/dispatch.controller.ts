@@ -20,6 +20,7 @@ export class DispatchController {
   @Post('in-transit') transit(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'picked_up', 'in_transit'); }
   @Post('cancel-pickup') cancel(@Body() b: any) { return this.dispatch.cancelPickup(b); }
   @Post('delivered') delivered(@Body() b: any) { return this.dispatch.delivered(b); }
+  @Get('validate-offer') validateOffer(@Query('offer_id') offerId: string, @Query('rider_id') riderId: string) { return this.dispatch.validateOffer(offerId, riderId); }
   @Get('current-offer') currentOffer(@Query('rider_id') riderId: string) { return this.dispatch.currentOffer(riderId); }
   @Get('active-ride') activeRide(@Query('rider_id') riderId: string) { return this.dispatch.activeRide(riderId); }
   @Get('status') status(@Query('rider_id') riderId: string) { return this.dispatch.status(riderId); }

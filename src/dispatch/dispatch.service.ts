@@ -85,43 +85,76 @@ export class DispatchService {
     const expiresAt = new Date(now.getTime() + timeoutSeconds * 1000).toISOString();
 
     const payload = {
-      type: 'order_offer',
       offer_id: offerId,
       order_id: orderId,
-      expires_at: expiresAt,
-      timeout_seconds: timeoutSeconds,
-      payload: {
-        offer_id: offerId,
-        order_id: orderId,
-        pickup: {
-          lat: Number(b?.pickup_lat ?? 19.076),
-          lng: Number(b?.pickup_lng ?? 72.8777),
-          address: b?.pickup_address?.toString() || 'Test pickup location',
-          contact_name: b?.pickup_contact_name?.toString() || 'Test Pickup',
-          contact_phone: b?.pickup_contact_phone?.toString() || '9999999999',
-        },
-        dropoff: {
-          lat: Number(b?.dropoff_lat ?? 19.088),
-          lng: Number(b?.dropoff_lng ?? 72.8877),
-          address: b?.dropoff_address?.toString() || 'Test dropoff location',
-          contact_name: b?.dropoff_contact_name?.toString() || 'Test Dropoff',
-          contact_phone_masked: b?.dropoff_contact_phone_masked?.toString() || '******9999',
-        },
-        distance_km: Number(b?.distance_km ?? 2.4),
-        estimated_earnings: Number(b?.estimated_earnings ?? 2500),
-        display_earnings: displayEarnings,
-        customer_fare: Number(b?.customer_fare ?? 3000),
-        display_customer_fare: displayCustomerFare,
-        platform_fee: Number(b?.platform_fee ?? 500),
-        display_platform_fee: displayPlatformFee,
-        timeout_seconds: timeoutSeconds,
-        expires_at: expiresAt,
-        server_sent_at: now.toISOString(),
-        special_notes: b?.special_notes?.toString() || 'Manual FCM test',
-        parcel_weight_kg: Number(b?.parcel_weight_kg ?? 2),
-        source: 'manual_test',
+      pickup: {
+        lat: Number(b?.pickup_lat ?? 19.076),
+        lng: Number(b?.pickup_lng ?? 72.8777),
+        address: b?.pickup_address?.toString() || 'Test pickup location',
+        contact_name: b?.pickup_contact_name?.toString() || 'Test Pickup',
+        contact_phone: b?.pickup_contact_phone?.toString() || '9999999999',
       },
+      dropoff: {
+        lat: Number(b?.dropoff_lat ?? 19.088),
+        lng: Number(b?.dropoff_lng ?? 72.8877),
+        address: b?.dropoff_address?.toString() || 'Test dropoff location',
+        contact_name: b?.dropoff_contact_name?.toString() || 'Test Dropoff',
+        contact_phone_masked: b?.dropoff_contact_phone_masked?.toString() || '******9999',
+      },
+      distance_km: Number(b?.distance_km ?? 2.4),
+      estimated_earnings: Number(b?.estimated_earnings ?? 2500),
+      display_earnings: displayEarnings,
+      customer_fare: Number(b?.customer_fare ?? 3000),
+      display_customer_fare: displayCustomerFare,
+      platform_fee: Number(b?.platform_fee ?? 500),
+      display_platform_fee: displayPlatformFee,
+      timeout_seconds: timeoutSeconds,
+      expires_at: expiresAt,
+      server_sent_at: now.toISOString(),
+      special_notes: b?.special_notes?.toString() || 'Manual FCM test',
+      parcel_weight_kg: Number(b?.parcel_weight_kg ?? 2),
+      source: 'manual_test',
     };
+
+    // Create a real dispatch and offer record so accept/reject works during testing
+    const dispatch = await this.dispatches.save({
+      order_id: orderId,
+      city: b?.city?.toString() || 'test_city',
+      pickup_lat: payload.pickup.lat,
+      pickup_lng: payload.pickup.lng,
+      pickup_address: payload.pickup.address,
+      pickup_contact_name: payload.pickup.contact_name,
+      pickup_contact_phone: payload.pickup.contact_phone,
+      dropoff_lat: payload.dropoff.lat,
+      dropoff_lng: payload.dropoff.lng,
+      dropoff_address: payload.dropoff.address,
+      dropoff_contact_name: payload.dropoff.contact_name,
+      dropoff_contact_phone: payload.dropoff.contact_phone_masked || '9999999999',
+      customer_id: b?.customer_id?.toString() || 'test_customer',
+      parcel_weight_kg: payload.parcel_weight_kg,
+      distance_km: payload.distance_km,
+      estimated_earnings: payload.estimated_earnings,
+      status: 'offered',
+      phase: 1,
+    });
+
+    const expires = new Date(now.getTime() + timeoutSeconds * 1000);
+    await this.offers.save({
+      id: offerId,
+      dispatch_id: dispatch.id,
+      order_id: orderId,
+      rider_id: riderId,
+      phase: 1,
+      distance_km: payload.distance_km,
+      estimated_earnings: payload.estimated_earnings,
+      timeout_seconds: timeoutSeconds,
+      expires_at: expires,
+    });
+
+    // Set rider status to busy so accept logic works
+    await this.redis.hset(`rider:status:${riderId}`, { status: 'busy', current_order_id: '' });
+    await this.redis.set(`rider:offered:${riderId}`, offerId, 'EX', timeoutSeconds);
+    await this.redis.set(`offer:timer:${offerId}`, riderId, 'EX', timeoutSeconds);
 
     const fcmResult = await this.notifications.sendOrderOffer(rider.fcm_token, payload);
     this.logDispatch('manual_fcm_test_sent', {
@@ -431,6 +464,25 @@ export class DispatchService {
 
   async status(riderId: string) {
     const st = await this.reconcileRiderStatus(riderId);
+
+    // Stale location timeout: mark rider offline if no location update for 6 hours
+    // and rider is not on an active trip.
+    const STALE_TIMEOUT_MS = 6 * 60 * 60 * 1000; // 6 hours (testing value)
+    if (st.status === 'available' && st.last_seen) {
+      const lastSeenMs = Date.parse(st.last_seen);
+      if (Date.now() - lastSeenMs > STALE_TIMEOUT_MS) {
+        this.logDispatch('ZipplyRiderStaleLocationTimeout', {
+          rider_id: riderId,
+          last_seen: st.last_seen,
+          timeout_hours: 6,
+          action: 'marking_offline',
+        });
+        await this.redis.zrem(onlineRidersGeoKey, riderId);
+        await this.redis.del(`rider:status:${riderId}`);
+        return { rider_id: riderId, status: 'offline', city: st.city, lat: Number(st.lat), lng: Number(st.lng), last_seen: st.last_seen, current_order_id: null, online_since: null, pending_offer: null };
+      }
+    }
+
     const pendingOffer = await this.currentOffer(riderId);
     if (st.current_order_id) {
       const d = await this.dispatches.findOneBy({ order_id: st.current_order_id });
@@ -451,6 +503,51 @@ export class DispatchService {
     if (!offer || offer.expires_at <= new Date()) return null;
     const d = await this.dispatches.findOneBy({ id: offer.dispatch_id });
     if (!d || ['assigned', 'delivered', 'cancelled'].includes(d.status)) return null;
+    return this.offerPayload(d, offer);
+  }
+
+  /// Validates if an offer is ready/eligible for a rider when FCM arrives.
+  /// Called by app immediately after receiving FCM notification.
+  /// Returns complete offer payload if valid, null if offer is not eligible.
+  async validateOffer(offerId: string, riderId: string) {
+    if (!uuidRegex.test(offerId || '')) throw new ApiError('INVALID_OFFER_ID', 'Valid offer_id is required', HttpStatus.BAD_REQUEST);
+    if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
+
+    // Check if offer exists and belongs to this rider
+    const offer = await this.offers.findOneBy({ id: offerId, rider_id: riderId });
+    if (!offer) {
+      this.logDispatch('ZipplyOfferValidationFailed', { offer_id: offerId, rider_id: riderId, reason: 'offer_not_found' });
+      return null;
+    }
+
+    // Check if offer is still pending (not expired, not already responded)
+    if (offer.status !== 'pending') {
+      this.logDispatch('ZipplyOfferValidationFailed', { offer_id: offerId, rider_id: riderId, reason: 'offer_not_pending', offer_status: offer.status });
+      return null;
+    }
+
+    // Check if offer has expired
+    if (offer.expires_at <= new Date()) {
+      this.logDispatch('ZipplyOfferValidationFailed', { offer_id: offerId, rider_id: riderId, reason: 'offer_expired', expires_at: offer.expires_at.toISOString() });
+      return null;
+    }
+
+    // Check if dispatch still exists and is in a valid state
+    const d = await this.dispatches.findOneBy({ id: offer.dispatch_id });
+    if (!d || ['assigned', 'delivered', 'cancelled'].includes(d.status)) {
+      this.logDispatch('ZipplyOfferValidationFailed', { offer_id: offerId, rider_id: riderId, reason: 'dispatch_not_valid', dispatch_status: d?.status || 'not_found' });
+      return null;
+    }
+
+    // Check if rider is still online/available in Redis
+    const riderStatus = await this.redis.hgetall(`rider:status:${riderId}`);
+    if (!riderStatus || riderStatus.status !== 'busy') {
+      this.logDispatch('ZipplyOfferValidationFailed', { offer_id: offerId, rider_id: riderId, reason: 'rider_not_available', rider_status: riderStatus?.status || 'not_found' });
+      return null;
+    }
+
+    // Offer is valid — log and return complete payload
+    this.logDispatch('ZipplyOfferValidationPassed', { offer_id: offerId, rider_id: riderId, dispatch_id: d.id, order_id: d.order_id });
     return this.offerPayload(d, offer);
   }
 

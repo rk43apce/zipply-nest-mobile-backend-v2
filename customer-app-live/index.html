@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Vida Customer — Live API Test</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- API Config Bar -->
+    <div class="config-bar">
+        <span class="config-label">API:</span>
+        <input type="text" id="api-base" value="http://localhost:3000" class="config-input">
+        <span class="config-status" id="config-status">●</span>
+    </div>
+
+    <div class="phone-frame">
+        <div class="status-bar">
+            <span>9:41</span>
+            <span class="status-icons">
+                <span class="material-icons-round" style="font-size:14px;">signal_cellular_alt</span>
+                <span class="material-icons-round" style="font-size:14px;">wifi</span>
+                <span class="material-icons-round" style="font-size:14px;">battery_full</span>
+            </span>
+        </div>
+        <div id="app"></div>
+        <nav class="bottom-nav" id="bottom-nav">
+            <div class="nav-item active" data-screen="home">
+                <span class="material-icons-round">home</span><span>Home</span>
+            </div>
+            <div class="nav-item" data-screen="orders">
+                <span class="material-icons-round">receipt_long</span><span>Orders</span>
+            </div>
+            <div class="nav-item" data-screen="wallet">
+                <span class="material-icons-round">account_balance_wallet</span><span>Wallet</span>
+            </div>
+            <div class="nav-item" data-screen="profile">
+                <span class="material-icons-round">person</span><span>Profile</span>
+            </div>
+        </nav>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+    <!-- API Log Panel -->
+    <div class="api-log" id="api-log">
+        <div class="log-header">
+            <span>API Log</span>
+            <button onclick="document.getElementById('api-log-body').innerHTML=''">Clear</button>
+        </div>
+        <div class="log-body" id="api-log-body"></div>
+    </div>
+
+    <script src="http://localhost:3000/ws/socket.io.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

@@ -29,3 +29,4 @@ customer-app-live/.git/
 tmp/
 temp/
 .cache/
+.kiro

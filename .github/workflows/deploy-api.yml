@@ -1,4 +1,4 @@
-name: Deploy Backend
+name: Deploy Zipply API
 
 on:
   push:
@@ -7,135 +7,37 @@ on:
 
 jobs:
   deploy:
-    name: Deploy NestJS API
     runs-on: ubuntu-latest
 
     steps:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          timeout: 30s
-          command_timeout: 10m
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
 
             APP_DIR="${{ secrets.APP_DIR }}"
-            REPOSITORY="https://github.com/rk43apce/zipply-nest-mobile-backend-v2.git"
-            BRANCH="main"
-            PM2_APP_NAME="zipply-api"
 
-            echo "Deploying application to: $APP_DIR"
-
-            # Clone application on first deployment
             if [ ! -d "$APP_DIR/.git" ]; then
-              echo "Application repository not found. Cloning..."
-
               rm -rf "$APP_DIR"
-              mkdir -p "$(dirname "$APP_DIR")"
-
-              git clone --branch "$BRANCH" "$REPOSITORY" "$APP_DIR"
+              git clone https://github.com/${{ github.repository }}.git "$APP_DIR"
             fi
 
             cd "$APP_DIR"
 
-            echo "Updating source code..."
-
-            git fetch origin "$BRANCH"
-            git reset --hard "origin/$BRANCH"
-            git clean -fd
-
-            echo "Installing dependencies..."
+            git fetch origin main
+            git reset --hard origin/main
 
             npm ci
-
-            echo "Building NestJS application..."
-
             npm run build
 
-            # Detect compiled NestJS entry file
-            if [ -f "$APP_DIR/dist/src/main.js" ]; then
-              ENTRY_FILE="$APP_DIR/dist/src/main.js"
-            elif [ -f "$APP_DIR/dist/main.js" ]; then
-              ENTRY_FILE="$APP_DIR/dist/main.js"
+            if pm2 describe zipply-api > /dev/null; then
+              pm2 restart zipply-api
             else
-              echo "ERROR: Compiled main.js was not found."
-
-              echo "Available files inside dist:"
-              find "$APP_DIR/dist" -maxdepth 4 -type f 2>/dev/null || true
-
-              exit 1
-            fi
-
-            echo "NestJS entry file found: $ENTRY_FILE"
-
-            # Restart existing PM2 process or create it
-            if pm2 describe "$PM2_APP_NAME" > /dev/null 2>&1; then
-              echo "Restarting existing PM2 application..."
-
-              pm2 restart "$PM2_APP_NAME" --update-env
-            else
-              echo "Starting new PM2 application..."
-
-              pm2 start "$ENTRY_FILE" \
-                --name "$PM2_APP_NAME" \
-                --cwd "$APP_DIR"
+              pm2 start dist/src/main.js --name zipply-api
             fi
 
             pm2 save
-
-            echo "Waiting for application startup..."
-
-            sleep 5
-
-            echo "Checking PM2 status..."
-
-            pm2 describe "$PM2_APP_NAME"
-
-            # Fail deployment if application is not online
-            PM2_STATUS=$(pm2 jlist | node -e "
-              let data = '';
-
-              process.stdin.on('data', chunk => data += chunk);
-
-              process.stdin.on('end', () => {
-                const processes = JSON.parse(data);
-                const app = processes.find(
-                  process => process.name === '$PM2_APP_NAME'
-                );
-
-                console.log(app?.pm2_env?.status || 'not_found');
-              });
-            ")
-
-            if [ "$PM2_STATUS" != "online" ]; then
-              echo "ERROR: PM2 application status is: $PM2_STATUS"
-
-              pm2 logs "$PM2_APP_NAME" \
-                --lines 100 \
-                --nostream || true
-
-              exit 1
-            fi
-
-            echo "Running local API health check..."
-
-            if ! curl --fail \
-              --silent \
-              --show-error \
-              --max-time 15 \
-              http://127.0.0.1:3000/ > /dev/null; then
-
-              echo "ERROR: Application is not responding on port 3000."
-
-              pm2 logs "$PM2_APP_NAME" \
-                --lines 100 \
-                --nostream || true
-
-              exit 1
-            fi
-
-            echo "Deployment completed successfully."

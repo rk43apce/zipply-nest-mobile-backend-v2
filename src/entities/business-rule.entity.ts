@@ -3,7 +3,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 @Index('idx_br_key_active', ['rule_key', 'is_active', 'effective_from'])
 @Entity('business_rules')
 export class BusinessRule {
-  @PrimaryGeneratedColumn('increment', { name: 'rule_id' }) id: number;
+  @PrimaryGeneratedColumn('increment') id: number;
   @Column({ length: 100 }) rule_key: string;
   @Column('text') rule_value: string;
   @Column({ length: 10, default: 'string' }) value_type: string; // 'int', 'string', 'json', 'boolean'

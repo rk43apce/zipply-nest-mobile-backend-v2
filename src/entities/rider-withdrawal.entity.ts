@@ -13,6 +13,7 @@ export class RiderWithdrawal {
   @Column({ length: 15, default: 'initiated' }) status: string; // 'initiated', 'processing', 'completed', 'failed', 'reversed'
   @Column({ nullable: true, length: 255 }) failure_reason?: string;
   @Column({ length: 64, unique: true }) idempotency_key: string;
+  @Column({ type: 'jsonb', nullable: true }) metadata?: Record<string, any>;
   @CreateDateColumn({ type: 'timestamp' }) initiated_at: Date;
   @Column({ nullable: true, type: 'timestamp' }) completed_at?: Date;
   @Column({ nullable: true, type: 'timestamp' }) failed_at?: Date;

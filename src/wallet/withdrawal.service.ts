@@ -1,4 +1,4 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { ApiError } from '../common/api-error';
@@ -7,6 +7,8 @@ import { Wallet, RiderWithdrawal, WalletTransaction, TopupLimitTracker, WalletAu
 
 @Injectable()
 export class WithdrawalService {
+  private readonly logger = new Logger(WithdrawalService.name);
+
   constructor(
     private dataSource: DataSource,
     @InjectRepository(Wallet) private wallets: Repository<Wallet>,

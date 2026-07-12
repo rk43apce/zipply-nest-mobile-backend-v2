@@ -25,6 +25,7 @@ function createService(overrides: Record<string, any> = {}) {
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
     redis as any,
     {} as any,
     {} as any,

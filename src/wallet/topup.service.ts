@@ -1,15 +1,18 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import * as crypto from 'crypto';
 import { ApiError } from '../common/api-error';
 import { money } from '../common/utils';
 import { PaymentTransaction, Wallet, WalletTransaction, TopupLimitTracker, TransactionLink, WalletAuditLog, BusinessRule } from '../entities';
+import { RazorpayService } from './razorpay.service';
 
 @Injectable()
 export class TopUpService {
+  private readonly logger = new Logger(TopUpService.name);
+
   constructor(
     private dataSource: DataSource,
+    private razorpay: RazorpayService,
     @InjectRepository(PaymentTransaction) private payments: Repository<PaymentTransaction>,
     @InjectRepository(Wallet) private wallets: Repository<Wallet>,
     @InjectRepository(WalletTransaction) private txns: Repository<WalletTransaction>,
@@ -36,13 +39,15 @@ export class TopUpService {
       const existing = await this.payments.findOne({ where: { idempotency_key: idempotencyKey } });
       if (existing) return this.paymentInitiatedResponse(existing);
 
-      // Create payment transaction
-      const razorpayOrderId = `order_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      // Create Razorpay order via service
+      const receipt = `tp_${wallet.id.slice(0, 8)}_${Date.now()}`;
+      const order = await this.razorpay.createOrder(amount, wallet.currency_code, receipt);
+      
       const payment = await this.payments.save({
         wallet_id: wallet.id,
         idempotency_key: idempotencyKey,
         gateway_provider: gateway,
-        gateway_order_id: razorpayOrderId,
+        gateway_order_id: order.id,
         amount,
         currency_code: wallet.currency_code,
         status: 'pending',
@@ -63,7 +68,7 @@ export class TopUpService {
   }
 
   // Confirm top-up: verify signature and credit wallet
-  async confirmTopUp(riderId: string, paymentTxnId: string, gatewayPaymentId: string, gatewaySignature: string) {
+  async confirmTopUp(riderId: string, paymentTxnId: string, gatewayPaymentId: string, gatewaySignature: string, gatewayOrderId?: string) {
     return this.dataSource.transaction(async manager => {
       const payment = await manager.findOne(PaymentTransaction, { where: { id: paymentTxnId } });
       if (!payment) throw new ApiError('PAYMENT_NOT_FOUND', 'Payment not found', HttpStatus.NOT_FOUND);
@@ -85,9 +90,28 @@ export class TopUpService {
         throw new ApiError('PAYMENT_EXPIRED', 'Payment order expired', HttpStatus.CONFLICT);
       }
 
-      // Verify Razorpay signature (in production)
+      // Security: Verify razorpay_order_id matches stored order
+      if (gatewayOrderId && payment.gateway_order_id !== gatewayOrderId) {
+        this.logger.warn(`[TOPUP_CONFIRM] Order ID mismatch: expected=${payment.gateway_order_id}, received=${gatewayOrderId}`);
+        throw new ApiError('ORDER_MISMATCH', 'Razorpay order ID does not match', HttpStatus.BAD_REQUEST);
+      }
+
+      // Security: Check for duplicate gateway_payment_id (prevent replay attacks)
+      const duplicatePayment = await manager.findOne(PaymentTransaction, {
+        where: { gateway_payment_id: gatewayPaymentId }
+      });
+      if (duplicatePayment && duplicatePayment.id !== payment.id) {
+        this.logger.warn(`[TOPUP_CONFIRM] Duplicate payment_id detected: ${gatewayPaymentId} already used in txn ${duplicatePayment.id}`);
+        throw new ApiError('DUPLICATE_PAYMENT', 'This payment has already been processed', HttpStatus.CONFLICT);
+      }
+
+      // Verify Razorpay signature
       if (payment.gateway_provider === 'razorpay') {
-        this.verifyRazorpaySignature(payment.gateway_order_id, gatewayPaymentId, gatewaySignature);
+        const isValid = this.razorpay.verifyPaymentSignature(payment.gateway_order_id, gatewayPaymentId, gatewaySignature);
+        if (!isValid) {
+          this.logger.warn(`[TOPUP_CONFIRM] Invalid signature for payment: ${paymentTxnId}, order: ${payment.gateway_order_id}`);
+          throw new ApiError('INVALID_SIGNATURE', 'Invalid Razorpay signature', HttpStatus.BAD_REQUEST);
+        }
       }
 
       // Credit wallet with optimistic locking
@@ -153,17 +177,6 @@ export class TopUpService {
       const finalWallet = await manager.findOne(Wallet, { where: { id: wallet.id } });
       return this.paymentConfirmedResponse(payment, finalWallet);
     });
-  }
-
-  // Verify Razorpay signature
-  private verifyRazorpaySignature(orderId: string, paymentId: string, signature: string) {
-    const secret = process.env.RAZORPAY_KEY_SECRET || 'test_secret';
-    const payload = `${orderId}|${paymentId}`;
-    const expectedSignature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-    
-    if (signature !== expectedSignature) {
-      throw new ApiError('INVALID_SIGNATURE', 'Invalid Razorpay signature', HttpStatus.BAD_REQUEST);
-    }
   }
 
   // Check topup limits
@@ -237,12 +250,18 @@ export class TopUpService {
       amount: payment.amount,
       currency: payment.currency_code,
       gateway: payment.gateway_provider,
-      key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_simulated',
+      key_id: this.razorpay.getKeyId(),
+      is_mock: this.razorpay.isMock(),
       prefill: {
         name: 'Rider',
         contact: '+91XXXXXXXXXX'
       },
-      expires_at: payment.expires_at
+      expires_at: payment.expires_at,
+      // In mock mode, provide a test signature the client can use to confirm
+      ...(this.razorpay.isMock() && {
+        mock_payment_id: `pay_mock_${Date.now()}`,
+        mock_signature: this.razorpay.generateSignature(payment.gateway_order_id, `pay_mock_${Date.now()}`)
+      })
     };
   }
 

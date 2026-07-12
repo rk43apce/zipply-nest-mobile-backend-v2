@@ -5,8 +5,8 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 @Index('idx_wal_entity', ['entity_type', 'entity_id'])
 @Entity('wallet_audit_log')
 export class WalletAuditLog {
-  @PrimaryGeneratedColumn('uuid') id: string;
-  @Column('uuid') wallet_id: string;
+  @PrimaryGeneratedColumn('increment', { type: 'bigint' }) id: string;
+  @Column({ type: 'varchar', length: 64 }) wallet_id: string;
   @Column({ length: 20 }) actor_type: string; // 'user', 'system', 'admin', 'gateway_webhook'
   @Column({ nullable: true, length: 64 }) actor_id?: string;
   @Column({ length: 100 }) action: string;

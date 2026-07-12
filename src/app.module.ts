@@ -12,6 +12,7 @@ import { WorkersModule } from './workers/workers.module';
 import { CustomerModule } from './customer/customer.module';
 import { WalletModule } from './wallet/wallet.module';
 import { OrdersModule } from './orders/orders.module';
+import { AdminModule } from './admin/admin.module';
 import { entities } from './entities';
 import { SessionValidationMiddleware } from './auth/session-validation.middleware';
 
@@ -44,6 +45,7 @@ import { SessionValidationMiddleware } from './auth/session-validation.middlewar
     CustomerModule,
     WalletModule,
     OrdersModule,
+    AdminModule,
     WorkersModule
   ]
 })

@@ -134,7 +134,7 @@ export class WalletSystemTables1720400000000 implements MigrationInterface {
       ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ NULL
     `);
 
-    // Seed initial business rules
+    // Seed initial business rules (skip duplicates)
     await queryRunner.query(`
       INSERT INTO business_rules (rule_key, rule_value, value_type, created_by) VALUES
       ('rider_negative_balance_threshold', '-10000', 'int', 'system'),
@@ -151,6 +151,7 @@ export class WalletSystemTables1720400000000 implements MigrationInterface {
       ('optimistic_lock_max_retries', '3', 'int', 'system'),
       ('cash_confirm_timeout_minutes', '15', 'int', 'system'),
       ('hold_expiry_minutes', '30', 'int', 'system')
+      ON CONFLICT (rule_key) DO NOTHING
     `);
   }
 

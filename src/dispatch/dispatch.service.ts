@@ -9,7 +9,7 @@ import { Repository } from 'typeorm';
 import { REDIS } from '../common/redis.provider';
 import { ApiError } from '../common/api-error';
 import { hasValidCoordinates, haversineKm, maskPhone, money } from '../common/utils';
-import { AcceptHint, CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning } from '../entities';
+import { AcceptHint, Customer, CustomerOrder, DispatchEvent, DispatchOffer, OrderDispatch, Rider, RiderEarning } from '../entities';
 import { OrdersService } from '../orders/orders.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { NotificationService } from '../notifications/notification.service';
@@ -30,6 +30,7 @@ export class DispatchService {
     @InjectRepository(DispatchOffer) private offers: Repository<DispatchOffer>,
     @InjectRepository(DispatchEvent) private events: Repository<DispatchEvent>,
     @InjectRepository(RiderEarning) private earnings: Repository<RiderEarning>,
+    @InjectRepository(Customer) private customers: Repository<Customer>,
     @InjectRepository(CustomerOrder) private customerOrders: Repository<CustomerOrder>,
     @Inject(REDIS) private redis: Redis,
     @InjectQueue('telemetry') private telemetry: Queue,
@@ -43,19 +44,25 @@ export class DispatchService {
     if (!rider || rider.onboarding_status !== 'activated') throw new ApiError('RIDER_NOT_ACTIVATED', 'Rider is not activated', HttpStatus.FORBIDDEN);
     const location = this.realRiderLocation(b);
     if (!hasValidCoordinates(location.lat, location.lng)) throw new ApiError('INVALID_COORDINATES', 'Invalid coordinates', HttpStatus.UNPROCESSABLE_ENTITY);
+    // The mobile availability flow only needs to send identity and live GPS.
+    // Profile attributes are authoritative in Postgres and must never become
+    // undefined Redis arguments when older/lightweight clients omit them.
+    const city = rider.city || b.city || '';
+    const vehicleType = rider.vehicle_type || b.vehicle_type || 'bike';
+    const maxParcelWeightKg = Number(rider.max_parcel_weight_kg ?? b.max_parcel_weight_kg ?? 10);
     const now = new Date().toISOString();
     await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
     const active = await this.findActiveTripForRider(b.rider_id);
     const onTrip = !!active;
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now, online_since: now, vehicle_type: b.vehicle_type, max_parcel_weight_kg: b.max_parcel_weight_kg, current_order_id: onTrip ? active.order_id : '' });
-    this.logDispatch('ZipplyBackendReceivedRiderLocation', { rider_id: b.rider_id, source: 'online', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, received_at: now });
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: onTrip ? 'on_trip' : 'available', city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now, online_since: now, vehicle_type: vehicleType, max_parcel_weight_kg: maxParcelWeightKg, current_order_id: onTrip ? active.order_id : '' });
+    this.logDispatch('ZipplyBackendReceivedRiderLocation', { rider_id: b.rider_id, source: 'online', city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, received_at: now });
     this.logDispatch('ZipplyRedisUpdatedRiderLocation', { rider_id: b.rider_id, redis_key: `rider:status:${b.rider_id}`, geo_key: onlineRidersGeoKey, lat: location.lat, lng: location.lng, updated_at: now });
-    this.logDispatch('rider_online', { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', active_order_id: active?.order_id, city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null });
+    this.logDispatch('rider_online', { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', active_order_id: active?.order_id, city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null });
     // Only re-match waiting orders if rider is NOT on a trip (i.e., newly available)
     if (!onTrip) {
       await this.offerWaitingDispatches();
     }
-    return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, online_since: now };
+    return { rider_id: b.rider_id, status: onTrip ? 'on_trip' : 'available', city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, online_since: now };
   }
 
   async offline(riderId: string) {
@@ -75,6 +82,17 @@ export class DispatchService {
     const rider = await this.riders.findOneBy({ id: riderId });
     if (!rider) throw new ApiError('RIDER_NOT_FOUND', 'Rider not found', HttpStatus.NOT_FOUND);
 
+    const paymentMethod = b?.payment_method?.toString() || 'prepaid';
+    const customerId = b?.customer_id?.toString();
+    if (paymentMethod === 'cash' && !customerId) {
+      throw new ApiError('CUSTOMER_ID_REQUIRED', 'customer_id is required for a cash test order', HttpStatus.BAD_REQUEST);
+    }
+    const customer = customerId ? await this.customers.findOneBy({ id: customerId }) : null;
+    if (customerId && !customer) throw new ApiError('CUSTOMER_NOT_FOUND', 'Customer not found', HttpStatus.NOT_FOUND);
+    if (!['cash', 'prepaid'].includes(paymentMethod)) {
+      throw new ApiError('INVALID_PAYMENT_METHOD', 'payment_method must be cash or prepaid', HttpStatus.BAD_REQUEST);
+    }
+
     const offerId = b?.offer_id?.toString() || randomUUID();
     const orderId = b?.order_id?.toString() || randomUUID();
     const timeoutSeconds = Number(b?.timeout_seconds || 120);
@@ -87,6 +105,9 @@ export class DispatchService {
     const payload = {
       offer_id: offerId,
       order_id: orderId,
+      order_reference: this.displayOrderReference(orderId),
+      offer_created_at: now.toISOString(),
+      offer_expires_at: expiresAt,
       pickup: {
         lat: Number(b?.pickup_lat ?? 19.076),
         lng: Number(b?.pickup_lng ?? 72.8777),
@@ -113,8 +134,43 @@ export class DispatchService {
       server_sent_at: now.toISOString(),
       special_notes: b?.special_notes?.toString() || 'Manual FCM test',
       parcel_weight_kg: Number(b?.parcel_weight_kg ?? 2),
+      payment_method: paymentMethod,
       source: 'manual_test',
     };
+
+    if (await this.dispatches.existsBy({ order_id: orderId })) {
+      throw new ApiError('ORDER_ALREADY_EXISTS', 'A dispatch with this order_id already exists', HttpStatus.CONFLICT);
+    }
+
+    if (paymentMethod === 'cash') {
+      const customerFare = payload.customer_fare;
+      const platformFee = payload.platform_fee;
+      const baseFare = Math.min(4000, Math.max(0, customerFare - platformFee));
+      await this.customerOrders.save({
+        order_id: orderId,
+        customer_id: customer!.id,
+        status: 'searching',
+        pickup_lat: payload.pickup.lat,
+        pickup_lng: payload.pickup.lng,
+        pickup_address: payload.pickup.address,
+        pickup_contact_name: payload.pickup.contact_name,
+        pickup_contact_phone: payload.pickup.contact_phone,
+        dropoff_lat: payload.dropoff.lat,
+        dropoff_lng: payload.dropoff.lng,
+        dropoff_address: payload.dropoff.address,
+        dropoff_contact_name: payload.dropoff.contact_name,
+        dropoff_contact_phone: b?.dropoff_contact_phone?.toString() || '9999999999',
+        parcel_weight_kg: payload.parcel_weight_kg,
+        special_notes: payload.special_notes,
+        distance_km: payload.distance_km,
+        base_fare: baseFare,
+        distance_fare: Math.max(0, customerFare - platformFee - baseFare),
+        platform_fee: platformFee,
+        total_amount: customerFare,
+        payment_method: 'cash',
+        payment_status: 'collect_on_delivery',
+      });
+    }
 
     // Create a real dispatch and offer record so accept/reject works during testing
     const dispatch = await this.dispatches.save({
@@ -130,7 +186,7 @@ export class DispatchService {
       dropoff_address: payload.dropoff.address,
       dropoff_contact_name: payload.dropoff.contact_name,
       dropoff_contact_phone: payload.dropoff.contact_phone_masked || '9999999999',
-      customer_id: b?.customer_id?.toString() || 'test_customer',
+      customer_id: customerId || 'test_customer',
       parcel_weight_kg: payload.parcel_weight_kg,
       distance_km: payload.distance_km,
       estimated_earnings: payload.estimated_earnings,
@@ -175,6 +231,7 @@ export class DispatchService {
       order_id: orderId,
       has_token: !!rider.fcm_token,
       notification_type: 'order_offer',
+      payment_method: paymentMethod,
       attempted: fcmResult.attempted,
       sent: fcmResult.sent,
       reason: fcmResult.reason,
@@ -301,73 +358,126 @@ export class DispatchService {
     }
   }
 
-  async accept(offerId: string, riderId: string, idempotencyKey?: string) {
+  async accept(offerId: string, riderId: string, idempotencyKey?: string, clientAcceptedAt?: string) {
+    const serverReceivedAt = new Date();
+    let orderId: string | null = null;
+    let offerExpiresAt: Date | null = null;
+    let acceptanceResult = 'INTERNAL_ERROR';
+    const clientTime = clientAcceptedAt ? Date.parse(clientAcceptedAt) : NaN;
+    const clientToServerDelayMs = Number.isFinite(clientTime) ? serverReceivedAt.getTime() - clientTime : null;
+    const logResult = () => this.logDispatch('rider_offer_acceptance_result', {
+      order_id: orderId,
+      offer_id: offerId,
+      rider_id: riderId,
+      offer_expires_at: offerExpiresAt?.toISOString() || null,
+      client_accepted_at: clientAcceptedAt || null,
+      server_received_at: serverReceivedAt.toISOString(),
+      client_to_server_delay_ms: clientToServerDelayMs,
+      acceptance_result: acceptanceResult,
+    });
+
     if (!uuidRegex.test(offerId || '')) throw new ApiError('INVALID_OFFER_ID', 'Valid offer_id is required', HttpStatus.BAD_REQUEST);
     if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
-    const offer = await this.offers.findOneBy({ id: offerId });
-    if (!offer) throw new ApiError('OFFER_NOT_FOUND', 'Offer not found', HttpStatus.NOT_FOUND);
-    if (offer.rider_id !== riderId) throw new ApiError('OFFER_NOT_FOUND', 'Offer not found', HttpStatus.NOT_FOUND);
-    if (offer.status === 'accepted') {
-      const existing = await this.dispatches.findOneByOrFail({ id: offer.dispatch_id });
-      if (existing.assigned_rider_id === riderId) return this.assignmentPayload(existing, offer);
-    }
-    if (idempotencyKey) {
-      const cached = await this.redis.get(`accept:idempotency:${idempotencyKey}`);
-      if (cached) return JSON.parse(cached);
-    }
-    // P0-3 FIX: Distinguish between timeout and other non-pending states
-    if (offer.status === 'timeout') throw new ApiError('OFFER_EXPIRED', 'Offer expired', HttpStatus.UNPROCESSABLE_ENTITY);
-    if (offer.status !== 'pending') throw new ApiError('OFFER_ALREADY_RESPONDED', 'Offer already responded', HttpStatus.CONFLICT);
-    if (offer.expires_at < new Date()) throw new ApiError('OFFER_EXPIRED', 'Offer expired', HttpStatus.UNPROCESSABLE_ENTITY);
-    const d = await this.dispatches.findOneByOrFail({ id: offer.dispatch_id });
-    
-    // P0-1 FIX: Validate order is still dispatchable before attempting assignment
-    if (!(await this.isCustomerOrderDispatchable(d))) {
-      await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
-      await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
-      await this.redis.del(`rider:offered:${riderId}`);
-      return { assigned: false, offer_id: offerId, message: 'Order was cancelled' };
-    }
-
-    // P1-5 FIX: Validate rider is still available before assignment
-    const riderStatus = await this.redis.hgetall(`rider:status:${riderId}`);
-    if (!riderStatus || riderStatus.status !== 'busy') {
-      await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
-      await this.redis.del(`rider:offered:${riderId}`);
-      throw new ApiError('RIDER_UNAVAILABLE', 'Rider is no longer available', HttpStatus.CONFLICT);
-    }
-    
-    const won = await this.redis.set(`order_lock:${offer.order_id}`, riderId, 'EX', 300, 'NX');
-    if (!won) {
-      const lockOwner = await this.redis.get(`order_lock:${offer.order_id}`);
-      if (lockOwner === riderId) {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const assigned = await this.dispatches.findOneByOrFail({ id: offer.dispatch_id });
-          if (assigned.assigned_rider_id === riderId) return this.assignmentPayload(assigned, offer);
-          await this.sleep(100);
+    try {
+      if (idempotencyKey) {
+        const cached = await this.redis.get(`accept:idempotency:${idempotencyKey}`);
+        if (cached) {
+          const payload = JSON.parse(cached);
+          orderId = payload.order_id || null;
+          acceptanceResult = 'ACCEPTED';
+          logResult();
+          return payload;
         }
       }
-      await this.offers.update(offerId, { status: 'cancelled', responded_at: new Date() });
-      await this.redis.hset(`rider:status:${riderId}`, { status: 'available', current_order_id: '' });
-      await this.redis.del(`rider:offered:${riderId}`);
-      return { assigned: false, offer_id: offerId, message: 'Order was taken by another rider' };
+
+      const committed = await this.offers.manager.transaction(async manager => {
+        const offerRepo = manager.getRepository(DispatchOffer);
+        const dispatchRepo = manager.getRepository(OrderDispatch);
+        const riderRepo = manager.getRepository(Rider);
+        const customerOrderRepo = manager.getRepository(CustomerOrder);
+        const eventRepo = manager.getRepository(DispatchEvent);
+
+        const offer = await offerRepo.createQueryBuilder('offer').setLock('pessimistic_write').where('offer.id = :offerId', { offerId }).getOne();
+        if (!offer || offer.rider_id !== riderId) throw new ApiError('OFFER_NOT_AVAILABLE', 'Offer is not available', HttpStatus.NOT_FOUND);
+        orderId = offer.order_id;
+        offerExpiresAt = offer.expires_at;
+
+        const dispatch = await dispatchRepo.createQueryBuilder('dispatch').setLock('pessimistic_write').where('dispatch.id = :dispatchId', { dispatchId: offer.dispatch_id }).getOne();
+        if (!dispatch) throw new ApiError('OFFER_NOT_AVAILABLE', 'Offer is not available', HttpStatus.NOT_FOUND);
+
+        if (offer.status === 'accepted' && dispatch.assigned_rider_id === riderId) {
+          return { payload: { ...this.assignmentPayload(dispatch, offer), acceptance_result: 'ACCEPTED' }, competitors: [] as DispatchOffer[], dispatch, idempotent: true };
+        }
+
+        const graceDeadline = offer.expires_at.getTime() + 5000;
+        if (serverReceivedAt.getTime() > graceDeadline) throw new ApiError('OFFER_EXPIRED', 'Offer expired', HttpStatus.UNPROCESSABLE_ENTITY);
+        // Expiry workers may mark the offer timeout at the rider-visible
+        // deadline. A request already received within the hidden network grace
+        // remains eligible; all other terminal states remain unavailable.
+        if (!['pending', 'timeout'].includes(offer.status)) throw new ApiError('OFFER_NOT_AVAILABLE', 'Offer is not available', HttpStatus.CONFLICT);
+
+        const customerOrder = dispatch.customer_id
+          ? await customerOrderRepo.createQueryBuilder('order').setLock('pessimistic_write').where('order.order_id = :orderId', { orderId: dispatch.order_id }).getOne()
+          : null;
+        if (dispatch.status === 'cancelled' || customerOrder?.status === 'cancelled') throw new ApiError('ORDER_CANCELLED', 'Order was cancelled', HttpStatus.CONFLICT);
+        if (dispatch.status === 'delivered' || customerOrder?.status === 'delivered') throw new ApiError('OFFER_NOT_AVAILABLE', 'Order no longer requires assignment', HttpStatus.CONFLICT);
+        if (dispatch.assigned_rider_id && dispatch.assigned_rider_id !== riderId) throw new ApiError('ORDER_ALREADY_ASSIGNED', 'Order already assigned', HttpStatus.CONFLICT);
+        if (customerOrder?.assigned_rider_id && customerOrder.assigned_rider_id !== riderId) throw new ApiError('ORDER_ALREADY_ASSIGNED', 'Order already assigned', HttpStatus.CONFLICT);
+        if (customerOrder && !['confirmed', 'searching'].includes(customerOrder.status)) throw new ApiError('OFFER_NOT_AVAILABLE', 'Order no longer requires assignment', HttpStatus.CONFLICT);
+        if (!['searching', 'offered', 'redispatching', 'no_rider'].includes(dispatch.status)) throw new ApiError('OFFER_NOT_AVAILABLE', 'Order no longer requires assignment', HttpStatus.CONFLICT);
+
+        const rider = await riderRepo.createQueryBuilder('rider').setLock('pessimistic_write').where('rider.id = :riderId', { riderId }).getOne();
+        if (!rider || rider.onboarding_status !== 'activated' || Number(rider.max_parcel_weight_kg) < Number(dispatch.parcel_weight_kg)) throw new ApiError('RIDER_NOT_ELIGIBLE', 'Rider is not eligible', HttpStatus.CONFLICT);
+        const activeOrder = await dispatchRepo.createQueryBuilder('active').where('active.assigned_rider_id = :riderId', { riderId }).andWhere('active.status IN (:...statuses)', { statuses: activeTripStatuses }).getOne();
+        if (activeOrder && activeOrder.id !== dispatch.id) throw new ApiError('RIDER_HAS_ACTIVE_ORDER', 'Rider already has an active order', HttpStatus.CONFLICT);
+
+        const assignedAt = new Date();
+        const assignment = await dispatchRepo.createQueryBuilder().update(OrderDispatch).set({ status: 'assigned', assigned_rider_id: riderId, assigned_at: assignedAt }).where('id = :id', { id: dispatch.id }).andWhere('assigned_rider_id IS NULL').execute();
+        if (assignment.affected !== 1) throw new ApiError('ORDER_ALREADY_ASSIGNED', 'Order already assigned', HttpStatus.CONFLICT);
+
+        await offerRepo.update(offer.id, { status: 'accepted', responded_at: assignedAt });
+        const competitors = await offerRepo.find({ where: { order_id: dispatch.order_id, status: 'pending' } });
+        await offerRepo.update({ order_id: dispatch.order_id, status: 'pending' }, { status: 'cancelled', reason: 'assigned_to_other', responded_at: assignedAt });
+        if (customerOrder) await customerOrderRepo.update(customerOrder.id, { status: 'assigned', assigned_rider_id: riderId, rider_name: rider.name, rider_phone_masked: maskPhone(rider.mobile), rider_vehicle_type: rider.vehicle_type, rider_rating: rider.rating, assigned_at: assignedAt });
+        await eventRepo.save({ dispatch_id: dispatch.id, order_id: dispatch.order_id, event_type: 'rider_assigned', rider_id: riderId, phase: offer.phase });
+        Object.assign(dispatch, { status: 'assigned', assigned_rider_id: riderId, assigned_at: assignedAt });
+        return { payload: { ...this.assignmentPayload(dispatch, offer), acceptance_result: 'ACCEPTED' }, competitors: competitors.filter(o => o.id !== offer.id), dispatch, idempotent: false };
+      });
+
+      const { payload, competitors, dispatch, idempotent } = committed;
+      try {
+        await this.redis.hset(`rider:status:${riderId}`, { status: 'on_trip', current_order_id: dispatch.order_id });
+        await this.redis.del(`rider:offered:${riderId}`);
+        if (idempotencyKey) await this.redis.set(`accept:idempotency:${idempotencyKey}`, JSON.stringify(payload), 'EX', 300);
+        if (!idempotent) {
+          for (const competitor of competitors) {
+            await this.redis.hset(`rider:status:${competitor.rider_id}`, { status: 'available', current_order_id: '' });
+            await this.cancelOfferFlash(competitor.rider_id, { offer_id: competitor.id, reason: 'assigned_to_other' });
+          }
+        }
+      } catch (error) {
+        this.logDispatch('rider_offer_acceptance_post_commit_sync_failed', { order_id: dispatch.order_id, offer_id: offerId, rider_id: riderId, error: error instanceof Error ? error.message : String(error) });
+      }
+      if (!idempotent) {
+        try {
+          await this.notifyOrder({ order_id: dispatch.order_id, event_type: 'rider_assigned', rider_id: riderId });
+          await this.confirmAssignmentToRider(riderId, payload);
+          this.gateway.emitToCustomer(dispatch.customer_id, 'rider_assigned', payload);
+        } catch (error) {
+          this.logDispatch('rider_offer_acceptance_notification_failed', { order_id: dispatch.order_id, offer_id: offerId, rider_id: riderId, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      acceptanceResult = 'ACCEPTED';
+      logResult();
+      return payload;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        const response = error.getResponse() as any;
+        acceptanceResult = response?.code || 'INTERNAL_ERROR';
+      }
+      logResult();
+      throw error;
     }
-    await this.offers.update(offerId, { status: 'accepted', responded_at: new Date() });
-    await this.dispatches.update(d.id, { status: 'assigned', assigned_rider_id: riderId, assigned_at: new Date() });
-    const others = await this.offers.find({ where: { order_id: d.order_id, status: 'pending' } });
-    await this.offers.update({ order_id: d.order_id, status: 'pending' }, { status: 'cancelled' });
-    for (const o of others.filter(o => o.rider_id !== riderId)) { await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' }); await this.cancelOfferFlash(o.rider_id, { offer_id: o.id, reason: 'assigned_to_other' }); }
-    await this.redis.hset(`rider:status:${riderId}`, { status: 'on_trip', current_order_id: d.order_id });
-    await this.redis.del(`rider:offered:${riderId}`);
-    await this.events.save({ dispatch_id: d.id, order_id: d.order_id, event_type: 'rider_assigned', rider_id: riderId, phase: offer.phase });
-    await this.notifyOrder({ order_id: d.order_id, event_type: 'rider_assigned', rider_id: riderId });
-    const payload = this.assignmentPayload(d, offer);
-    if (idempotencyKey) {
-      await this.redis.set(`accept:idempotency:${idempotencyKey}`, JSON.stringify(payload), 'EX', 300);
-    }
-    await this.confirmAssignmentToRider(riderId, payload);
-    this.gateway.emitToCustomer(d.customer_id, 'rider_assigned', payload);
-    return payload;
   }
 
   async reject(offerId: string, riderId: string, reason = 'other') {
@@ -390,8 +500,19 @@ export class DispatchService {
     if (!uuidRegex.test(riderId || '')) throw new ApiError('INVALID_RIDER_ID', 'Valid rider_id is required', HttpStatus.BAD_REQUEST);
     const offer = await this.offers.findOneBy({ id: offerId, rider_id: riderId });
     if (!offer) throw new ApiError('OFFER_NOT_FOUND', 'Offer not found', HttpStatus.NOT_FOUND);
+    const ackKey = `offer:ack:${riderId}:${offerId}:offer_received`;
+    const firstAck = await this.redis.set(ackKey, '1', 'EX', 86400, 'NX');
+    if (!firstAck) {
+      this.logDispatch('rider_offer_ack_duplicate_ignored', { dispatch_id: offer.dispatch_id, order_id: offer.order_id, offer_id: offerId, rider_id: riderId, source });
+      return { offer_id: offerId, rider_id: riderId, acked: true, duplicate: true };
+    }
     const ackedAt = receivedAt || new Date().toISOString();
-    await this.events.save({ dispatch_id: offer.dispatch_id, order_id: offer.order_id, event_type: 'offer_received', rider_id: riderId, phase: offer.phase, details: { source, received_at: ackedAt, offer_status: offer.status } });
+    try {
+      await this.events.save({ dispatch_id: offer.dispatch_id, order_id: offer.order_id, event_type: 'offer_received', rider_id: riderId, phase: offer.phase, details: { source, received_at: ackedAt, offer_status: offer.status } });
+    } catch (error) {
+      await this.redis.del(ackKey);
+      throw error;
+    }
     this.logDispatch('rider_offer_ack_received', { dispatch_id: offer.dispatch_id, order_id: offer.order_id, offer_id: offerId, rider_id: riderId, source, received_at: ackedAt });
     return { offer_id: offerId, rider_id: riderId, acked: true };
   }
@@ -436,7 +557,10 @@ export class DispatchService {
 
   async delivered(b: any) {
     const d = await this.mustAssigned(b.order_id, b.rider_id);
-    if (d.status === 'delivered') return this.deliveredPayload(d, new Date());
+    if (d.status === 'delivered') {
+      const completedOrder = await this.customerOrders.findOneBy({ order_id: d.order_id });
+      return this.deliveredPayload(d, d.delivered_at || new Date(), d.estimated_earnings, null, 0, completedOrder);
+    }
     if (!(await this.isCustomerOrderDispatchable(d))) throw new ApiError('ORDER_NOT_ACTIVE', 'Customer order is not active', HttpStatus.CONFLICT);
     if (!['in_transit', 'picked_up'].includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot deliver in current delivery state', HttpStatus.CONFLICT);
     const now = new Date();
@@ -451,9 +575,8 @@ export class DispatchService {
     await this.riders.increment({ id: b.rider_id }, 'total_deliveries', 1);
     await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '', last_seen: now.toISOString() });
     await this.redis.del(`order_lock:${d.order_id}`);
-    // Re-match waiting orders now that rider is available again
-    await this.offerWaitingDispatches();
-    return this.deliveredPayload(d, now, total, duration, wait);
+    const order = await this.customerOrders.findOneBy({ order_id: d.order_id });
+    return this.deliveredPayload(d, now, total, duration, wait, order);
   }
 
   async cancelOrderDispatch(orderId: string, reason = 'customer_cancelled') {
@@ -585,7 +708,10 @@ export class DispatchService {
 
   async expireOffers() {
     const expired = await this.offers.find({ where: { status: 'pending' }, take: 100 });
-    for (const o of expired.filter(o => o.expires_at <= new Date())) {
+    // Keep the database offer pending through the hidden transit grace so an
+    // already-sent acceptance can be processed before redispatch begins.
+    const graceNow = Date.now();
+    for (const o of expired.filter(o => o.expires_at.getTime() + 5000 <= graceNow)) {
       await this.offers.update(o.id, { status: 'timeout', responded_at: new Date() });
       await this.redis.hset(`rider:status:${o.rider_id}`, { status: 'available', current_order_id: '' });
       await this.redis.del(`rider:offered:${o.rider_id}`);
@@ -725,11 +851,19 @@ export class DispatchService {
     const platformFee = 500;
     const riderEarnings = d.estimated_earnings || 0;
     const customerFare = riderEarnings + platformFee;
-    return { type: 'order_offer', offer_id: o.id, order_id: d.order_id, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address }, distance_km: Number(d.distance_km), estimated_earnings: riderEarnings, display_earnings: money(riderEarnings), customer_fare: customerFare, display_customer_fare: money(customerFare), platform_fee: platformFee, display_platform_fee: money(platformFee), timeout_seconds: o.timeout_seconds, expires_at: o.expires_at, server_sent_at: new Date(), special_notes: d.special_notes, parcel_weight_kg: Number(d.parcel_weight_kg) };
+    return { type: 'order_offer', offer_id: o.id, order_id: d.order_id, order_reference: this.displayOrderReference(d.order_id), offer_created_at: o.offered_at, offer_expires_at: o.expires_at, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address }, distance_km: Number(d.distance_km), estimated_earnings: riderEarnings, display_earnings: money(riderEarnings), customer_fare: customerFare, display_customer_fare: money(customerFare), platform_fee: platformFee, display_platform_fee: money(platformFee), timeout_seconds: o.timeout_seconds, expires_at: o.expires_at, server_sent_at: new Date(), special_notes: d.special_notes, parcel_weight_kg: Number(d.parcel_weight_kg) };
   }
-  private deliveredPayload(d: OrderDispatch, deliveredAt: Date, total = d.estimated_earnings || 0, duration: number | null = null, wait = 0) {
+  private displayOrderReference(orderId: string) {
+    let hash = 2166136261;
+    for (const code of orderId) {
+      hash ^= code.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `ZPL-${String(hash >>> 0).padStart(9, '0').slice(-9)}`;
+  }
+  private deliveredPayload(d: OrderDispatch, deliveredAt: Date, total = d.estimated_earnings || 0, duration: number | null = null, wait = 0, order?: CustomerOrder | null) {
     const distanceBonus = Math.max(0, total - 4000);
-    return { order_id: d.order_id, delivered_at: deliveredAt, earnings: { base_fare: 4000, distance_bonus: distanceBonus, surge_bonus: 0, total, display_total: money(total) }, trip_summary: { distance_km: Number(d.distance_km), duration_minutes: duration, pickup_wait_minutes: wait }, rider_status_after: 'available', customer_notified: true };
+    return { order_id: d.order_id, delivered_at: deliveredAt, earnings: { base_fare: 4000, distance_bonus: distanceBonus, surge_bonus: 0, total, display_total: money(total) }, trip_summary: { distance_km: Number(d.distance_km), duration_minutes: duration, pickup_wait_minutes: wait }, rider_status_after: 'available', customer_notified: true, payment_method: order?.payment_method || 'prepaid', cash_confirmation: order?.payment_method === 'cash' ? { cash_amount: Number(order.total_amount), display_cash_amount: money(Number(order.total_amount)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)) } : null };
   }
   private assignmentPayload(d: OrderDispatch, o: DispatchOffer) { return { assigned: true, order_id: d.order_id, offer_id: o.id, dispatch_id: d.id, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}` }; }
   private activeDelivery(d: OrderDispatch) { return { order_id: d.order_id, dispatch_id: d.id, delivery_status: d.status, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}`, assigned_at: d.assigned_at }; }

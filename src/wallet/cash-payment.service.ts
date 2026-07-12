@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { ApiError } from '../common/api-error';
 import { money } from '../common/utils';
-import { TripPayment, Wallet, BusinessRule } from '../entities';
+import { TripPayment, Wallet, BusinessRule, CustomerOrder, OrderDispatch, WalletTransaction } from '../entities';
 import { CommissionEngine } from './commission.engine';
 
 @Injectable()
@@ -13,8 +13,50 @@ export class CashPaymentService {
     @InjectRepository(TripPayment) private tripPayments: Repository<TripPayment>,
     @InjectRepository(Wallet) private wallets: Repository<Wallet>,
     @InjectRepository(BusinessRule) private rules: Repository<BusinessRule>,
+    @InjectRepository(CustomerOrder) private orders: Repository<CustomerOrder>,
+    @InjectRepository(OrderDispatch) private dispatches: Repository<OrderDispatch>,
     private commissionEngine: CommissionEngine
   ) {}
+
+  async confirmOrderCash(riderId: string, orderId: string, idempotencyKey: string) {
+    if (!idempotencyKey) throw new ApiError('IDEMPOTENCY_REQUIRED', 'Idempotency key required', HttpStatus.BAD_REQUEST);
+    return this.dataSource.transaction(async manager => {
+      const order = await manager.createQueryBuilder(CustomerOrder, 'order').setLock('pessimistic_write').where('order.order_id = :orderId', { orderId }).getOne();
+      if (!order || order.payment_method !== 'cash') throw new ApiError('CASH_ORDER_NOT_FOUND', 'Cash order not found', HttpStatus.NOT_FOUND);
+      if (order.assigned_rider_id !== riderId) throw new ApiError('ORDER_NOT_ASSIGNED', 'Order does not belong to this rider', HttpStatus.FORBIDDEN);
+      const dispatch = await manager.findOne(OrderDispatch, { where: { order_id: orderId, assigned_rider_id: riderId } });
+      if (!dispatch || dispatch.status !== 'delivered') throw new ApiError('ORDER_NOT_DELIVERED', 'Order is not delivered', HttpStatus.CONFLICT);
+
+      const txnKey = `cash_commission_${order.id}`;
+      const existing = await manager.findOne(WalletTransaction, { where: { idempotency_key: txnKey } });
+      if (order.payment_status === 'cash_confirmed' && existing) return this.cashOrderPayload(order, existing.running_balance);
+      if (order.payment_status !== 'collect_on_delivery') throw new ApiError('CASH_ALREADY_PROCESSED', 'Cash payment already processed', HttpStatus.CONFLICT);
+
+      let wallet = await manager.createQueryBuilder(Wallet, 'wallet').setLock('pessimistic_write').where('wallet.user_id = :riderId AND wallet.user_type = :type', { riderId, type: 'rider' }).getOne();
+      if (!wallet) {
+        wallet = await manager.save(Wallet, {
+          user_id: riderId,
+          user_type: 'rider',
+          currency_code: 'INR',
+          cached_balance: 0,
+          available_balance: 0,
+          status: 'active',
+        });
+      }
+      if (wallet.status !== 'active') throw new ApiError('WALLET_NOT_AVAILABLE', 'Rider wallet is not available', HttpStatus.CONFLICT);
+      const commission = Number(order.platform_fee);
+      const newBalance = Number(wallet.cached_balance) - commission;
+      await manager.update(Wallet, wallet.id, { cached_balance: newBalance, available_balance: Math.max(0, Number(wallet.available_balance) - commission), version: wallet.version + 1 });
+      await manager.save(WalletTransaction, { wallet_id: wallet.id, idempotency_key: txnKey, txn_type: 'debit', txn_category: 'purchase', amount: commission, running_balance: newBalance, description: `Platform commission — cash order ${order.order_id}`, reference_type: 'order', reference_id: order.order_id, status: 'completed', completed_at: new Date() });
+      await manager.update(CustomerOrder, order.id, { payment_status: 'cash_confirmed' });
+      order.payment_status = 'cash_confirmed';
+      return this.cashOrderPayload(order, newBalance);
+    });
+  }
+
+  private cashOrderPayload(order: CustomerOrder, newBalance: number) {
+    return { order_id: order.order_id, cash_collected: Number(order.total_amount), display_cash_collected: money(Number(order.total_amount)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)), new_wallet_balance: newBalance, display_new_wallet_balance: money(newBalance), payment_status: 'cash_confirmed' };
+  }
 
   // Get active cash trip for a rider
   async getActiveCashTrip(riderId: string) {

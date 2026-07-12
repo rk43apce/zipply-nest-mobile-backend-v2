@@ -10,7 +10,7 @@ export class DispatchController {
   @Post('offline') offline(@Body() b: any) { return this.dispatch.offline(b.rider_id); }
   @Post('location') location(@Body() b: any) { return this.dispatch.location(b); }
   @Post('start') start(@Body() b: any) { return this.dispatch.start(b); }
-  @Post('accept') accept(@Body() b: any) { return this.dispatch.accept(b.offer_id, b.rider_id, b.idempotency_key); }
+  @Post('accept') accept(@Body() b: any) { return this.dispatch.accept(b.offer_id, b.rider_id, b.idempotency_key, b.client_accepted_at); }
   @Post('reject') reject(@Body() b: any) { return this.dispatch.reject(b.offer_id, b.rider_id, b.reason); }
   @Post('offer-ack') offerAck(@Body() b: any) { return this.dispatch.offerAck(b.offer_id, b.rider_id, b.source, b.received_at); }
   @Post('test-fcm') testFcm(@Body() b: any) { return this.dispatch.testFcm(b); }

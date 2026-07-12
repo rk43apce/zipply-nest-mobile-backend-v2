@@ -8,6 +8,7 @@ import { WithdrawalService } from './withdrawal.service';
 import { CashPaymentService } from './cash-payment.service';
 import { CommissionEngine } from './commission.engine';
 import { BusinessRulesService } from './business-rules.service';
+import { PayoutProcessorService } from './payout-processor.service';
 
 @Controller('rider/wallet')
 @UseGuards(JwtAuthGuard)
@@ -18,7 +19,8 @@ export class WalletController {
     private withdrawal: WithdrawalService,
     private cashPayment: CashPaymentService,
     private commission: CommissionEngine,
-    private rules: BusinessRulesService
+    private rules: BusinessRulesService,
+    private payoutProcessor: PayoutProcessorService
   ) {}
 
   // Get wallet balance
@@ -46,14 +48,14 @@ export class WalletController {
   @Post(':riderId/topup/confirm')
   async confirmTopup(
     @Param('riderId') riderId: string,
-    @Body() body: { payment_txn_id: string; gateway_payment_id: string; gateway_signature: string },
+    @Body() body: { payment_txn_id: string; gateway_payment_id: string; gateway_signature: string; razorpay_order_id?: string },
     @Request() req: any
   ) {
     this.validateRiderId(req, riderId);
     if (!body.payment_txn_id || !body.gateway_payment_id || !body.gateway_signature) {
       throw new ApiError('INVALID_REQUEST', 'All payment fields required', HttpStatus.BAD_REQUEST);
     }
-    return await this.topup.confirmTopUp(riderId, body.payment_txn_id, body.gateway_payment_id, body.gateway_signature);
+    return await this.topup.confirmTopUp(riderId, body.payment_txn_id, body.gateway_payment_id, body.gateway_signature, body.razorpay_order_id);
   }
 
   // Get withdrawal info
@@ -120,7 +122,7 @@ export class WalletController {
     if (!body.idempotency_key) {
       throw new ApiError('IDEMPOTENCY_REQUIRED', 'idempotency_key required', HttpStatus.BAD_REQUEST);
     }
-    return await this.cashPayment.confirmCashCollection(riderId, tripId, body.idempotency_key);
+    return await this.cashPayment.confirmOrderCash(riderId, tripId, body.idempotency_key);
   }
 
   // Check rider eligibility
@@ -173,6 +175,27 @@ export class WalletController {
   ) {
     // TODO: Add admin authorization check
     return await this.rules.updateRule(key, body.rule_value, body.value_type, 'admin');
+  }
+
+  // Admin: Process all pending payouts
+  @Post('admin/payouts/process')
+  async processPayouts(@Request() req: any) {
+    // TODO: Add admin authorization check
+    return await this.payoutProcessor.processAllPending();
+  }
+
+  // Admin: Process single withdrawal payout
+  @Post('admin/payouts/:withdrawalId/process')
+  async processSinglePayout(@Param('withdrawalId') withdrawalId: string, @Request() req: any) {
+    // TODO: Add admin authorization check
+    return await this.payoutProcessor.processPayout(parseInt(withdrawalId));
+  }
+
+  // Admin: Get payout status
+  @Get('admin/payouts/:withdrawalId/status')
+  async getPayoutStatus(@Param('withdrawalId') withdrawalId: string, @Request() req: any) {
+    // TODO: Add admin authorization check
+    return await this.payoutProcessor.getPayoutStatus(parseInt(withdrawalId));
   }
 
   // Helper: Validate rider ID from JWT matches param

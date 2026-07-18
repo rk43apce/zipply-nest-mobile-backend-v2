@@ -59,6 +59,48 @@ export class NotificationService {
     });
   }
 
+  /**
+   * Send a push notification to a customer.
+   * Used for order status updates: rider_assigned, picked_up, in_transit, delivered, order_cancelled.
+   */
+  async sendToCustomer(
+    token: string | null | undefined,
+    body: Record<string, any>,
+  ): Promise<FcmSendResult> {
+    if (!token) return { attempted: false, sent: false, reason: 'missing_token' };
+
+    const app = this.firebase();
+    if (!app) {
+      return { attempted: false, sent: false, reason: 'firebase_not_configured' };
+    }
+
+    try {
+      const admin = this.firebaseAdmin();
+      const messageId = await admin.messaging(app).send({
+        token,
+        android: { priority: 'high' },
+        data: this.toFcmData(body),
+        notification: this.notificationFor(body),
+      });
+      this.log('fcm_customer_send_success', {
+        type: body.type,
+        order_id: body.order_id,
+        message_id: messageId,
+        token_suffix: token.slice(-6),
+      });
+      return { attempted: true, sent: true, message_id: messageId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log('fcm_customer_send_failed', {
+        type: body.type,
+        order_id: body.order_id,
+        error: message,
+        token_suffix: token.slice(-6),
+      });
+      return { attempted: true, sent: false, error: message };
+    }
+  }
+
   private async sendToRider(
     token: string | null | undefined,
     body: Record<string, any>,
@@ -181,6 +223,22 @@ export class NotificationService {
     }
     if (body.type === 'order_assigned_confirmed') {
       return { title: 'Order assigned', body: 'Head to pickup' };
+    }
+    // Customer notification types
+    if (body.type === 'rider_assigned') {
+      return { title: 'Rider assigned', body: `${body.rider_name || 'A rider'} is heading to pickup` };
+    }
+    if (body.type === 'picked_up') {
+      return { title: 'Parcel picked up', body: 'Your parcel is on its way to the drop location' };
+    }
+    if (body.type === 'in_transit') {
+      return { title: 'On the way', body: 'Your parcel is being delivered' };
+    }
+    if (body.type === 'delivered') {
+      return { title: 'Parcel delivered!', body: 'Your parcel has been delivered successfully' };
+    }
+    if (body.type === 'order_cancelled') {
+      return { title: 'Order cancelled', body: body.reason || 'Your order has been cancelled' };
     }
     return undefined;
   }

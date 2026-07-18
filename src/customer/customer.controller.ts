@@ -14,4 +14,5 @@ export class CustomerController {
   @UseGuards(CustomerAuthGuard) @Post('addresses') addAddress(@Req() req: any, @Body() body: any) { return this.customers.addAddress(req.customer.customer_id, body); }
   @UseGuards(CustomerAuthGuard) @Put('addresses/:id') updateAddress(@Req() req: any, @Param('id') id: string, @Body() body: any) { return this.customers.updateAddress(req.customer.customer_id, id, body); }
   @UseGuards(CustomerAuthGuard) @Delete('addresses/:id') deleteAddress(@Req() req: any, @Param('id') id: string) { return this.customers.deleteAddress(req.customer.customer_id, id); }
+  @UseGuards(CustomerAuthGuard) @Post('device/fcm-token') registerFcmToken(@Req() req: any, @Body() body: any) { return this.customers.registerFcmToken(req.customer.customer_id, body.fcm_token, body.device_platform); }
 }

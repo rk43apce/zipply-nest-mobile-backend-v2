@@ -100,6 +100,18 @@ export class CustomerService {
     return { message: 'Address deleted' };
   }
 
+  async registerFcmToken(customerId: string, fcmToken: string, devicePlatform?: string) {
+    if (!fcmToken || fcmToken.trim().length === 0) {
+      throw new ApiError('INVALID_TOKEN', 'FCM token is required', HttpStatus.BAD_REQUEST);
+    }
+    await this.customers.update(customerId, {
+      fcm_token: fcmToken,
+      device_platform: devicePlatform || null,
+      fcm_token_updated_at: new Date(),
+    } as any);
+    return { registered: true, message: 'FCM token registered' };
+  }
+
   private signAccess(customer: Customer) {
     return this.jwt.sign({ customer_id: customer.id, sub: customer.id, mobile: customer.mobile, type: 'customer' });
   }

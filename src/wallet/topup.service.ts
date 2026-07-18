@@ -275,4 +275,122 @@ export class TopUpService {
       was_unblocked: payment.amount > 0 && wallet.cached_balance > -10000
     };
   }
+
+  // ==========================================================================
+  // Customer Top-Up (same logic as rider, but user_type = 'customer')
+  // ==========================================================================
+
+  async initiateCustomerTopUp(customerId: string, amount: number, gateway: string = 'razorpay', idempotencyKey: string) {
+    try {
+      if (amount <= 0) throw new ApiError('INVALID_AMOUNT', 'Amount must be positive', HttpStatus.BAD_REQUEST);
+      if (!idempotencyKey) throw new ApiError('IDEMPOTENCY_REQUIRED', 'Idempotency key required', HttpStatus.BAD_REQUEST);
+
+      const wallet = await this.wallets.findOne({ where: { user_id: customerId as any, user_type: 'customer' } });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found. Please contact support.', HttpStatus.NOT_FOUND);
+      if (wallet.status === 'frozen') throw new ApiError('WALLET_FROZEN', 'Wallet is frozen', HttpStatus.FORBIDDEN);
+
+      await this.checkTopupLimits(wallet, amount);
+
+      const existing = await this.payments.findOne({ where: { idempotency_key: idempotencyKey } });
+      if (existing) return this.paymentInitiatedResponse(existing);
+
+      const receipt = `ctp_${wallet.id.slice(0, 8)}_${Date.now()}`;
+      const order = await this.razorpay.createOrder(amount, wallet.currency_code, receipt);
+
+      const payment = await this.payments.save({
+        wallet_id: wallet.id,
+        idempotency_key: idempotencyKey,
+        gateway_provider: gateway,
+        gateway_order_id: order.id,
+        amount,
+        currency_code: wallet.currency_code,
+        status: 'pending',
+        expires_at: new Date(Date.now() + 3600000)
+      } as any);
+
+      return this.paymentInitiatedResponse(payment);
+    } catch (error) {
+      this.logger.error('[CUSTOMER_TOPUP_INITIATE_ERROR]', { customerId, amount, error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  }
+
+  async confirmCustomerTopUp(customerId: string, paymentTxnId: string, gatewayPaymentId: string, gatewaySignature: string, gatewayOrderId?: string) {
+    return this.dataSource.transaction(async manager => {
+      const payment = await manager.findOne(PaymentTransaction, { where: { id: paymentTxnId } });
+      if (!payment) throw new ApiError('PAYMENT_NOT_FOUND', 'Payment not found', HttpStatus.NOT_FOUND);
+
+      const wallet = await manager.findOne(Wallet, { where: { id: payment.wallet_id } });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found', HttpStatus.NOT_FOUND);
+      if (wallet.user_id !== (customerId as any)) throw new ApiError('WALLET_MISMATCH', 'Wallet does not belong to customer', HttpStatus.FORBIDDEN);
+
+      if (payment.status === 'captured') {
+        const newWallet = await manager.findOne(Wallet, { where: { id: wallet.id } });
+        return this.paymentConfirmedResponse(payment, newWallet!);
+      }
+      if (payment.status !== 'pending') throw new ApiError('PAYMENT_INVALID_STATE', `Cannot confirm payment in status: ${payment.status}`, HttpStatus.CONFLICT);
+      if (payment.expires_at && payment.expires_at < new Date()) throw new ApiError('PAYMENT_EXPIRED', 'Payment order expired', HttpStatus.CONFLICT);
+
+      if (gatewayOrderId && payment.gateway_order_id !== gatewayOrderId) {
+        throw new ApiError('ORDER_MISMATCH', 'Razorpay order ID does not match', HttpStatus.BAD_REQUEST);
+      }
+
+      const duplicatePayment = await manager.findOne(PaymentTransaction, { where: { gateway_payment_id: gatewayPaymentId } });
+      if (duplicatePayment && duplicatePayment.id !== payment.id) {
+        throw new ApiError('DUPLICATE_PAYMENT', 'This payment has already been processed', HttpStatus.CONFLICT);
+      }
+
+      if (payment.gateway_provider === 'razorpay') {
+        const isValid = this.razorpay.verifyPaymentSignature(payment.gateway_order_id, gatewayPaymentId, gatewaySignature);
+        if (!isValid) throw new ApiError('INVALID_SIGNATURE', 'Invalid Razorpay signature', HttpStatus.BAD_REQUEST);
+      }
+
+      const oldBalance = wallet.cached_balance;
+      const newBalance = oldBalance + payment.amount;
+
+      const updateResult = await manager.update(
+        Wallet,
+        { id: wallet.id, version: wallet.version },
+        { cached_balance: newBalance, available_balance: wallet.available_balance + payment.amount, version: wallet.version + 1 }
+      );
+      if (updateResult.affected === 0) throw new ApiError('OPTIMISTIC_LOCK_CONFLICT', 'Concurrent update detected, retry', HttpStatus.CONFLICT);
+
+      const txn = await manager.save(WalletTransaction, {
+        wallet_id: wallet.id,
+        idempotency_key: `customer_topup_${paymentTxnId}_${Date.now()}`,
+        txn_type: 'credit',
+        txn_category: 'topup',
+        amount: payment.amount,
+        running_balance: newBalance,
+        description: `Top-up via ${payment.gateway_provider}`,
+        reference_type: 'payment_transaction',
+        reference_id: String(payment.id),
+        status: 'completed',
+        completed_at: new Date()
+      });
+
+      await manager.save(TransactionLink, { payment_txn_id: payment.id, wallet_txn_id: txn.id });
+
+      payment.status = 'captured';
+      payment.gateway_payment_id = gatewayPaymentId;
+      payment.metadata = { ...payment.metadata, gateway_signature: gatewaySignature };
+      payment.captured_at = new Date();
+      await manager.save(payment);
+
+      await this.incrementLimits(manager, wallet.id as any, payment.amount);
+
+      await manager.save(WalletAuditLog, {
+        wallet_id: wallet.id,
+        actor_type: 'customer',
+        action: 'topup_confirmed',
+        entity_type: 'payment_transaction',
+        entity_id: 0,
+        old_state: { balance: oldBalance },
+        new_state: { balance: newBalance }
+      } as any);
+
+      const finalWallet = await manager.findOne(Wallet, { where: { id: wallet.id } });
+      return this.paymentConfirmedResponse(payment, finalWallet!);
+    });
+  }
 }

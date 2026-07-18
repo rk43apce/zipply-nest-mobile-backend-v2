@@ -1,4 +1,4 @@
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -6,14 +6,18 @@ import { ApiError } from '../common/api-error';
 import { haversineKm, maskPhone, mobileRegex, money } from '../common/utils';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { Customer, CustomerOrder, OrderDispatch, OrderEvent, OrderRating, Rider, Wallet } from '../entities';
+import { NotificationService } from '../notifications/notification.service';
 import { WalletService } from '../wallet/wallet.service';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private dataSource: DataSource,
     private moduleRef: ModuleRef,
     private walletService: WalletService,
+    private notifications: NotificationService,
     @InjectRepository(CustomerOrder) private orders: Repository<CustomerOrder>,
     @InjectRepository(OrderDispatch) private dispatches: Repository<OrderDispatch>,
     @InjectRepository(OrderEvent) private events: Repository<OrderEvent>,
@@ -39,6 +43,16 @@ export class OrdersService {
     const paymentMethod = body.payment_method || 'wallet';
     if (!['wallet', 'cash', 'online'].includes(paymentMethod)) throw new ApiError('INVALID_PAYMENT_METHOD', 'Payment method must be wallet, cash, or online', HttpStatus.BAD_REQUEST);
     const pricing = this.calculate(body.pickup, body.dropoff, body.parcel?.weight_kg || 1);
+
+    // Wallet balance validation: customer wallet cannot go negative.
+    if (paymentMethod === 'wallet') {
+      const wallet = await this.wallets.findOne({ where: { user_id: customerId, user_type: 'customer' } as any });
+      if (!wallet) throw new ApiError('WALLET_NOT_FOUND', 'Wallet not found. Please top up your wallet.', HttpStatus.NOT_FOUND);
+      if (wallet.available_balance < pricing.total) {
+        throw new ApiError('INSUFFICIENT_BALANCE', `Insufficient wallet balance. You need ${money(pricing.total)} but have ${money(wallet.available_balance)}.`, HttpStatus.UNPROCESSABLE_ENTITY);
+      }
+    }
+
     const orderId = await this.generateOrderId();
     let holdId: string | undefined;
     let paymentStatus = paymentMethod === 'cash' ? 'collect_on_delivery' : paymentMethod === 'online' ? 'payment_pending' : 'held';
@@ -61,6 +75,7 @@ export class OrdersService {
       return saved;
     });
     if (paymentMethod !== 'online') await this.startDispatch(order, customer);
+    this.logOrder('order_created', { order_id: orderId, customer_id: customerId, payment_method: paymentMethod, total_amount: pricing.total, distance_km: pricing.distance_km, status: paymentMethod === 'online' ? 'payment_pending' : 'searching' });
     return this.createdPayload(await this.orders.findOneByOrFail({ order_id: orderId }), pricing, paymentMethod);
   }
 
@@ -131,15 +146,39 @@ export class OrdersService {
     return { order_id: orderId, delivery_rating: body.delivery_rating, rider_rating: body.rider_rating, message: 'Thank you for your feedback!' };
   }
 
+  async getRiderLocation(customerId: string, orderId: string, redis: any) {
+    const order = await this.mustOwn(customerId, orderId);
+    if (!order.assigned_rider_id) {
+      throw new ApiError('RIDER_NOT_ASSIGNED', 'No rider assigned to this order yet', HttpStatus.NOT_FOUND);
+    }
+    const riderStatus = await redis.hgetall(`rider:status:${order.assigned_rider_id}`);
+    if (!riderStatus || !riderStatus.lat || !riderStatus.lng) {
+      throw new ApiError('LOCATION_UNAVAILABLE', 'Rider location is not available', HttpStatus.NOT_FOUND);
+    }
+    return {
+      order_id: orderId,
+      rider_id: order.assigned_rider_id,
+      lat: Number(riderStatus.lat),
+      lng: Number(riderStatus.lng),
+      accuracy: riderStatus.accuracy ? Number(riderStatus.accuracy) : null,
+      updated_at: riderStatus.last_seen || riderStatus.gps_timestamp || null,
+    };
+  }
+
   async handleDispatchEvent(event: any) {
     const order = await this.orders.findOneBy({ order_id: event.order_id });
     if (!order) return;
     const patch: any = { status: event.event_type };
     let title = event.event_type;
+    let fcmType = event.event_type;
+    let riderName: string | undefined;
+
     if (event.event_type === 'rider_assigned') {
       const rider = event.rider_id ? await this.riders.findOneBy({ id: event.rider_id }) : null;
       Object.assign(patch, { status: 'assigned', assigned_rider_id: event.rider_id, rider_name: rider?.name, rider_phone_masked: maskPhone(rider?.mobile), rider_vehicle_type: rider?.vehicle_type, rider_rating: rider?.rating, assigned_at: new Date() });
       title = 'Rider Assigned';
+      fcmType = 'rider_assigned';
+      riderName = rider?.name;
     }
     if (event.event_type === 'delivered') {
       patch.status = 'delivered'; patch.delivered_at = new Date();
@@ -148,14 +187,36 @@ export class OrdersService {
         await manager.update(CustomerOrder, order.id, patch);
         await manager.save(OrderEvent, { order_id: order.order_id, event_type: 'delivered', title: 'Delivered', description: 'Order delivered' });
       });
+      this.logOrder('customer_order_status_updated', { order_id: order.order_id, customer_id: order.customer_id, order_status: 'delivered', event_type: event.event_type, rider_id: event.rider_id });
+      await this.notifyCustomer(order.customer_id, { type: 'delivered', order_id: order.order_id });
       return;
     }
     if (event.event_type === 'picked_up') patch.picked_up_at = new Date();
     await this.orders.update(order.id, patch);
     await this.events.save({ order_id: order.order_id, event_type: event.event_type, title, description: event.description });
+    this.logOrder('customer_order_status_updated', { order_id: order.order_id, customer_id: order.customer_id, order_status: patch.status, event_type: event.event_type, rider_id: event.rider_id });
+
+    // Send FCM push to customer for status updates.
+    await this.notifyCustomer(order.customer_id, {
+      type: fcmType,
+      order_id: order.order_id,
+      ...(riderName ? { rider_name: riderName } : {}),
+    });
+  }
+
+  /** Send FCM notification to a customer by looking up their token. */
+  private async notifyCustomer(customerId: string, payload: Record<string, any>) {
+    try {
+      const customer = await this.customers.findOneBy({ id: customerId });
+      if (!customer?.fcm_token) return;
+      await this.notifications.sendToCustomer(customer.fcm_token, payload);
+    } catch {
+      // Best-effort — don't fail the main operation if push fails.
+    }
   }
 
   private async startDispatch(order: CustomerOrder, customer: Customer) {
+    this.logOrder('rider_search_started', { order_id: order.order_id, customer_id: customer.id, pickup_lat: order.pickup_lat, pickup_lng: order.pickup_lng, dropoff_lat: order.dropoff_lat, dropoff_lng: order.dropoff_lng });
     const dispatch = this.moduleRef.get(DispatchService, { strict: false });
     await dispatch.start({ order_id: order.order_id, city: 'Mumbai', pickup: { lat: Number(order.pickup_lat), lng: Number(order.pickup_lng), address: order.pickup_address, contact_name: order.pickup_contact_name, contact_phone: order.pickup_contact_phone }, dropoff: { lat: Number(order.dropoff_lat), lng: Number(order.dropoff_lng), address: order.dropoff_address, contact_name: order.dropoff_contact_name, contact_phone: order.dropoff_contact_phone }, customer_id: customer.id, order_meta: { parcel_weight_kg: order.parcel_weight_kg, special_notes: order.special_notes } });
     await this.orders.update(order.id, { status: 'searching' });
@@ -253,5 +314,9 @@ export class OrdersService {
     const totalRatings = (rider.total_ratings || 0) + 1;
     const newRating = ((Number(rider.rating || 0) * (rider.total_ratings || 0)) + Number(rating)) / totalRatings;
     await this.riders.update(riderId, { rating: Math.round(newRating * 100) / 100, total_ratings: totalRatings });
+  }
+
+  private logOrder(event: string, data: Record<string, any>) {
+    this.logger.log(JSON.stringify({ event, timestamp: new Date().toISOString(), ...data }));
   }
 }

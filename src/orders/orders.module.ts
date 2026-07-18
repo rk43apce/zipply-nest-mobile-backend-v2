@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { redisProvider } from '../common/redis.provider';
 import { CustomerModule } from '../customer/customer.module';
 import { DispatchModule } from '../dispatch/dispatch.module';
 import { Customer, CustomerOrder, OrderDispatch, OrderEvent, OrderRating, Rider, Wallet } from '../entities';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { WalletModule } from '../wallet/wallet.module';
 import { OrdersController } from './orders.controller';
 import { OrdersService } from './orders.service';
@@ -18,9 +20,10 @@ import { OrdersService } from './orders.service';
     }),
     CustomerModule,
     WalletModule,
-    DispatchModule
+    DispatchModule,
+    NotificationsModule
   ],
-  providers: [OrdersService],
+  providers: [OrdersService, redisProvider],
   controllers: [OrdersController],
   exports: [OrdersService]
 })

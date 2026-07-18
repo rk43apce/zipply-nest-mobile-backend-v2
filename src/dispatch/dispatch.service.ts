@@ -475,9 +475,15 @@ export class DispatchService {
       }
       if (!idempotent) {
         try {
+          // Generate pickup OTP for this order assignment
+          const pickupOtp = this.generatePickupOtp();
+          await this.dispatches.update(dispatch.id, { pickup_otp: pickupOtp });
+          await this.customerOrders.update({ order_id: dispatch.order_id }, { pickup_otp: pickupOtp });
+          this.logDispatch('pickup_otp_generated', { order_id: dispatch.order_id, dispatch_id: dispatch.id, rider_id: riderId, otp_generated: true });
+
           await this.notifyOrder({ order_id: dispatch.order_id, event_type: 'rider_assigned', rider_id: riderId });
           await this.confirmAssignmentToRider(riderId, payload);
-          this.gateway.emitToCustomer(dispatch.customer_id, 'rider_assigned', payload);
+          this.gateway.emitToCustomer(dispatch.customer_id, 'rider_assigned', { ...payload, pickup_otp: pickupOtp });
         } catch (error) {
           this.logDispatch('rider_offer_acceptance_notification_failed', { order_id: dispatch.order_id, offer_id: offerId, rider_id: riderId, error: error instanceof Error ? error.message : String(error) });
         }
@@ -533,6 +539,10 @@ export class DispatchService {
   }
 
   async transition(orderId: string, riderId: string, from: string | string[], to: string) {
+    // Block picked_up transition through generic endpoint — must use OTP verification endpoint
+    if (to === 'picked_up') {
+      throw new ApiError('OTP_REQUIRED', 'Pickup confirmation requires OTP verification. Use POST /api/dispatch/verify-pickup-otp instead.', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
     const d = await this.mustAssigned(orderId, riderId);
     if (d.status === to) return { order_id: orderId, status: to, already_applied: true };
     if (!(Array.isArray(from) ? from : [from]).includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot transition from current delivery state', HttpStatus.CONFLICT);
@@ -540,13 +550,12 @@ export class DispatchService {
     const patch: any = { status: to };
     if (to === 'en_route_pickup') patch.en_route_at = now;
     if (to === 'arrived_pickup') patch.arrived_pickup_at = now;
-    if (to === 'picked_up') patch.picked_up_at = now;
     if (to === 'in_transit') patch.in_transit_at = now;
     await this.dispatches.update(d.id, patch);
     await this.events.save({ dispatch_id: d.id, order_id: orderId, event_type: to, rider_id: riderId });
     await this.notifyOrder({ order_id: orderId, event_type: to, rider_id: riderId });
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: orderId, status: to, message: to });
-    const messages: any = { en_route_pickup: { message: 'Rider is heading to pickup', customer_message: 'Your rider is heading to pick up your order!' }, arrived_pickup: { arrival_recorded_at: now, customer_notified: true, wait_timeout_minutes: 10, message: 'Waiting for parcel. Customer has been notified.' }, picked_up: { picked_up_at: now, customer_message: 'Your order has been picked up!' }, in_transit: { customer_message: 'Your order is on the way!' } };
+    const messages: any = { en_route_pickup: { message: 'Rider is heading to pickup', customer_message: 'Your rider is heading to pick up your order!' }, arrived_pickup: { arrival_recorded_at: now, customer_notified: true, wait_timeout_minutes: 10, message: 'Waiting for parcel. Customer has been notified.' }, in_transit: { customer_message: 'Your order is on the way!' } };
     return { order_id: orderId, status: to, ...messages[to] };
   }
 
@@ -902,4 +911,47 @@ export class DispatchService {
   }
   private assignmentPayload(d: OrderDispatch, o: DispatchOffer) { return { assigned: true, order_id: d.order_id, offer_id: o.id, dispatch_id: d.id, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}` }; }
   private activeDelivery(d: OrderDispatch) { return { order_id: d.order_id, dispatch_id: d.id, delivery_status: d.status, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}`, assigned_at: d.assigned_at }; }
+
+  // ---------------------------------------------------------------------------
+  // Pickup OTP
+  // ---------------------------------------------------------------------------
+
+  private generatePickupOtp(): string {
+    return String(Math.floor(1000 + Math.random() * 9000)); // 4-digit OTP
+  }
+
+  async verifyPickupOtp(orderId: string, riderId: string, otp: string) {
+    if (!otp || otp.length < 4) throw new ApiError('INVALID_OTP', 'Please enter a valid 4-digit OTP', HttpStatus.BAD_REQUEST);
+    const d = await this.mustAssigned(orderId, riderId);
+
+    // Idempotent: if already verified, return success
+    if (d.pickup_otp_verified_at) {
+      return { order_id: orderId, verified: true, already_verified: true, verified_at: d.pickup_otp_verified_at };
+    }
+
+    // Must be in arrived_pickup state (rider is at pickup location)
+    if (!['arrived_pickup', 'en_route_pickup', 'assigned'].includes(d.status)) {
+      throw new ApiError('INVALID_STATE', 'Pickup OTP can only be verified at pickup location', HttpStatus.CONFLICT);
+    }
+
+    // Validate OTP matches
+    if (!d.pickup_otp) {
+      throw new ApiError('OTP_NOT_GENERATED', 'No pickup OTP was generated for this order', HttpStatus.CONFLICT);
+    }
+    if (d.pickup_otp !== otp.trim()) {
+      this.logDispatch('pickup_otp_verification_failed', { order_id: orderId, rider_id: riderId, dispatch_id: d.id, reason: 'otp_mismatch' });
+      throw new ApiError('INVALID_OTP', 'Incorrect OTP. Please check with the sender.', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    // OTP matches — mark as verified and transition to picked_up
+    const now = new Date();
+    await this.dispatches.update(d.id, { pickup_otp_verified_at: now, status: 'picked_up', picked_up_at: now });
+    await this.customerOrders.update({ order_id: orderId }, { pickup_otp_verified_at: now, picked_up_at: now, status: 'picked_up' });
+    await this.events.save({ dispatch_id: d.id, order_id: orderId, event_type: 'picked_up', rider_id: riderId });
+    await this.notifyOrder({ order_id: orderId, event_type: 'picked_up', rider_id: riderId });
+    this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: orderId, status: 'picked_up', message: 'Parcel picked up' });
+    this.logDispatch('pickup_otp_verified', { order_id: orderId, rider_id: riderId, dispatch_id: d.id, verified_at: now.toISOString() });
+
+    return { order_id: orderId, verified: true, status: 'picked_up', picked_up_at: now.toISOString() };
+  }
 }

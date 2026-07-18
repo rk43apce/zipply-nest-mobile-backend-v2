@@ -23,6 +23,8 @@ export class OrderDispatch {
   @Column({ default: false }) requires_heavy_vehicle: boolean;
   @Column({ type: 'text', nullable: true }) special_notes?: string;
   @Column('uuid', { nullable: true }) assigned_rider_id?: string;
+  @Column({ nullable: true, length: 6 }) pickup_otp?: string;
+  @Column({ type: 'timestamp', nullable: true }) pickup_otp_verified_at?: Date;
   @Column({ type: 'smallint', default: 0 }) redispatch_count: number;
   @Column({ default: 0 }) riders_offered_count: number;
   @Column({ default: 0 }) riders_rejected_count: number;

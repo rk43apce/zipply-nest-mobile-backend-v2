@@ -39,6 +39,8 @@ export class CustomerOrder {
   @Column({ nullable: true, length: 20 }) rider_vehicle_type?: string;
   @Column('decimal', { precision: 3, scale: 2, nullable: true }) rider_rating?: number;
   @Column({ nullable: true }) estimated_delivery_minutes?: number;
+  @Column({ nullable: true, length: 6 }) pickup_otp?: string;
+  @Column({ type: 'timestamp', nullable: true }) pickup_otp_verified_at?: Date;
   @Column({ type: 'timestamp', nullable: true }) confirmed_at?: Date;
   @Column({ type: 'timestamp', nullable: true }) assigned_at?: Date;
   @Column({ type: 'timestamp', nullable: true }) picked_up_at?: Date;

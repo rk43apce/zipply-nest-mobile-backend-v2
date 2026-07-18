@@ -17,6 +17,7 @@ export class DispatchController {
   @Post('en-route-pickup') enRoute(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'assigned', 'en_route_pickup'); }
   @Post('arrived-pickup') arrived(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, ['assigned', 'en_route_pickup'], 'arrived_pickup'); }
   @Post('picked-up') picked(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'arrived_pickup', 'picked_up'); }
+  @Post('verify-pickup-otp') verifyPickupOtp(@Body() b: any) { return this.dispatch.verifyPickupOtp(b.order_id, b.rider_id, b.otp); }
   @Post('in-transit') transit(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'picked_up', 'in_transit'); }
   @Post('cancel-pickup') cancel(@Body() b: any) { return this.dispatch.cancelPickup(b); }
   @Post('delivered') delivered(@Body() b: any) { return this.dispatch.delivered(b); }

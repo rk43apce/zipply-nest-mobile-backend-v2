@@ -9,8 +9,9 @@ export class OrdersController {
   constructor(private orders: OrdersService, @Inject(REDIS) private redis: Redis) {}
   @UseGuards(CustomerAuthGuard) @Post('estimate') estimate(@Req() req: any, @Body() body: any) { return this.orders.estimate(body); }
   @UseGuards(CustomerAuthGuard) @Post('create') create(@Req() req: any, @Body() body: any) { return this.orders.create(req.customer.customer_id, body); }
-  @UseGuards(CustomerAuthGuard) @Post(':orderId/online/confirm') confirmOnline(@Param('orderId') orderId: string) { return this.orders.confirmOnlinePayment(orderId); }
+  @UseGuards(CustomerAuthGuard) @Post(':orderId/online/confirm') confirmOnline(@Req() req: any, @Param('orderId') orderId: string) { return this.orders.confirmOnlinePayment(req.customer.customer_id, orderId); }
   @UseGuards(CustomerAuthGuard) @Get() list(@Req() req: any, @Query() q: any) { return this.orders.list(req.customer.customer_id, Number(q.page || 1), Number(q.limit || 20), q.status); }
+  @UseGuards(CustomerAuthGuard) @Get('active') active(@Req() req: any) { return this.orders.active(req.customer.customer_id); }
   @UseGuards(CustomerAuthGuard) @Get(':orderId/status') status(@Req() req: any, @Param('orderId') orderId: string) { return this.orders.status(req.customer.customer_id, orderId); }
   @UseGuards(CustomerAuthGuard) @Get(':orderId/timeline') timeline(@Req() req: any, @Param('orderId') orderId: string) { return this.orders.timeline(req.customer.customer_id, orderId); }
   @UseGuards(CustomerAuthGuard) @Get(':orderId/rider-location') async riderLocation(@Req() req: any, @Param('orderId') orderId: string) { return this.orders.getRiderLocation(req.customer.customer_id, orderId, this.redis); }

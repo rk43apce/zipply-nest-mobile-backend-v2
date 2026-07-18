@@ -1,7 +1,7 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Not, In, Repository } from 'typeorm';
 import { ApiError } from '../common/api-error';
 import { haversineKm, maskPhone, mobileRegex, money } from '../common/utils';
 import { DispatchService } from '../dispatch/dispatch.service';
@@ -79,9 +79,8 @@ export class OrdersService {
     return this.createdPayload(await this.orders.findOneByOrFail({ order_id: orderId }), pricing, paymentMethod);
   }
 
-  async confirmOnlinePayment(orderId: string) {
-    const order = await this.orders.findOneBy({ order_id: orderId });
-    if (!order) throw new ApiError('ORDER_NOT_FOUND', 'Order not found', HttpStatus.NOT_FOUND);
+  async confirmOnlinePayment(customerId: string, orderId: string) {
+    const order = await this.mustOwn(customerId, orderId);
     if (order.payment_method !== 'online') throw new ApiError('INVALID_PAYMENT_METHOD', 'Order is not online payment', HttpStatus.CONFLICT);
     if (order.status !== 'payment_pending') return { order_id: orderId, status: order.status };
     await this.orders.update(order.id, { status: 'confirmed', payment_status: 'paid', confirmed_at: new Date() });
@@ -93,7 +92,7 @@ export class OrdersService {
 
   async get(customerId: string, orderId: string) {
     const order = await this.syncFromDispatch(await this.mustOwn(customerId, orderId));
-    return { order_id: order.order_id, status: order.status, pickup: { lat: Number(order.pickup_lat), lng: Number(order.pickup_lng), address: order.pickup_address }, dropoff: { lat: Number(order.dropoff_lat), lng: Number(order.dropoff_lng), address: order.dropoff_address }, parcel: { weight_kg: Number(order.parcel_weight_kg), special_notes: order.special_notes }, pricing: { total: order.total_amount, display_total: money(order.total_amount) }, payment: { method: order.payment_method, hold_id: order.hold_id, status: order.payment_status }, rider: order.assigned_rider_id ? { rider_id: order.assigned_rider_id, name: order.rider_name, phone_masked: order.rider_phone_masked, vehicle_type: order.rider_vehicle_type, rating: Number(order.rider_rating || 0) } : null, pickup_otp: order.pickup_otp, distance_km: Number(order.distance_km), estimated_delivery_minutes: order.estimated_delivery_minutes, can_cancel: this.canCancel(order.status), cancellation_fee: this.cancelFee(order.status), created_at: order.created_at, confirmed_at: order.confirmed_at, assigned_at: order.assigned_at, picked_up_at: order.picked_up_at, delivered_at: order.delivered_at };
+    return this.orderPayload(order);
   }
 
   async status(customerId: string, orderId: string) {
@@ -111,11 +110,33 @@ export class OrdersService {
     const safePage = Math.max(1, page || 1);
     const safeLimit = Math.min(Math.max(1, limit || 20), 100);
     const where: any = { customer_id: customerId };
-    if (status) where.status = status;
+    if (status === 'history') {
+      where.status = In(['delivered', 'cancelled']);
+    } else if (status) {
+      where.status = status;
+    }
     const [rows, total] = await this.orders.findAndCount({ where, order: { created_at: 'DESC' }, skip: (safePage - 1) * safeLimit, take: safeLimit });
     const rated = await this.ratings.find({ where: rows.map(o => ({ order_id: o.order_id })) as any });
     const ratedSet = new Set(rated.map(r => r.order_id));
     return { orders: rows.map(o => ({ order_id: o.order_id, status: o.status, pickup_address: o.pickup_address, dropoff_address: o.dropoff_address, total_amount: o.total_amount, display_total: money(o.total_amount), distance_km: Number(o.distance_km), rider_name: o.rider_name, created_at: o.created_at, delivered_at: o.delivered_at, is_rated: ratedSet.has(o.order_id) })), pagination: { page: safePage, limit: safeLimit, total, has_next: safePage * safeLimit < total } };
+  }
+
+  async active(customerId: string) {
+    const rows = await this.orders.find({
+      where: {
+        customer_id: customerId,
+        status: Not(In(['delivered', 'cancelled'])),
+      },
+      order: { created_at: 'DESC' },
+    });
+    const syncedOrders = await Promise.all(
+      rows.map(async row => {
+        const synced = await this.syncFromDispatch(row);
+        return this.orderPayload(synced);
+      }),
+    );
+    const orders = syncedOrders.filter(order => !['delivered', 'cancelled'].includes(order.status));
+    return { orders, count: orders.length };
   }
 
   async cancel(customerId: string, orderId: string, reason: string) {
@@ -294,6 +315,29 @@ export class OrdersService {
 
   private createdPayload(order: CustomerOrder, pricing: any, paymentMethod: string) {
     return { order_id: order.order_id, status: order.status, pickup: { lat: Number(order.pickup_lat), lng: Number(order.pickup_lng), address: order.pickup_address }, dropoff: { lat: Number(order.dropoff_lat), lng: Number(order.dropoff_lng), address: order.dropoff_address }, pricing: this.pricingPayload(pricing), payment: { method: paymentMethod, hold_id: order.hold_id, hold_amount: paymentMethod === 'wallet' ? order.total_amount : 0, status: order.payment_status }, distance_km: Number(order.distance_km), estimated_delivery_minutes: order.estimated_delivery_minutes, dispatch_status: paymentMethod === 'online' ? 'waiting_for_payment' : 'searching', created_at: order.created_at };
+  }
+
+  private orderPayload(order: CustomerOrder) {
+    return {
+      order_id: order.order_id,
+      status: order.status,
+      pickup: { lat: Number(order.pickup_lat), lng: Number(order.pickup_lng), address: order.pickup_address },
+      dropoff: { lat: Number(order.dropoff_lat), lng: Number(order.dropoff_lng), address: order.dropoff_address },
+      parcel: { weight_kg: Number(order.parcel_weight_kg), special_notes: order.special_notes },
+      pricing: { total: order.total_amount, display_total: money(order.total_amount) },
+      payment: { method: order.payment_method, hold_id: order.hold_id, status: order.payment_status },
+      rider: order.assigned_rider_id ? { rider_id: order.assigned_rider_id, name: order.rider_name, phone_masked: order.rider_phone_masked, vehicle_type: order.rider_vehicle_type, rating: Number(order.rider_rating || 0) } : null,
+      pickup_otp: order.pickup_otp,
+      distance_km: Number(order.distance_km),
+      estimated_delivery_minutes: order.estimated_delivery_minutes,
+      can_cancel: this.canCancel(order.status),
+      cancellation_fee: this.cancelFee(order.status),
+      created_at: order.created_at,
+      confirmed_at: order.confirmed_at,
+      assigned_at: order.assigned_at,
+      picked_up_at: order.picked_up_at,
+      delivered_at: order.delivered_at,
+    };
   }
 
   private async mustOwn(customerId: string, orderId: string) {

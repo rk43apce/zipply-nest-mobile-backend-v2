@@ -180,6 +180,18 @@ export class OrdersService {
       fcmType = 'rider_assigned';
       riderName = rider?.name;
     }
+    // P0 FIX: Handle rider cancellation — reset customer order to searching state
+    // and clear the previous rider info so customer sees correct status.
+    if (event.event_type === 'rider_cancelled') {
+      Object.assign(patch, { status: 'searching', assigned_rider_id: null, rider_name: null, rider_phone_masked: null, rider_vehicle_type: null, rider_rating: null, assigned_at: null });
+      title = 'Rider Cancelled';
+      fcmType = 'rider_cancelled';
+      await this.orders.update(order.id, patch);
+      await this.events.save({ order_id: order.order_id, event_type: 'rider_cancelled', title: 'Finding Another Rider', description: event.description || 'Previous rider cancelled. Searching for a new rider.' });
+      this.logOrder('customer_order_status_updated', { order_id: order.order_id, customer_id: order.customer_id, order_status: 'searching', event_type: 'rider_cancelled', rider_id: event.rider_id });
+      await this.notifyCustomer(order.customer_id, { type: 'rider_cancelled', order_id: order.order_id, message: 'Your rider cancelled. We are finding another rider.' });
+      return;
+    }
     if (event.event_type === 'delivered') {
       patch.status = 'delivered'; patch.delivered_at = new Date();
       await this.dataSource.transaction(async manager => {

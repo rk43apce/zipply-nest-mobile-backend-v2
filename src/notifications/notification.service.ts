@@ -240,6 +240,9 @@ export class NotificationService {
     if (body.type === 'order_cancelled') {
       return { title: 'Order cancelled', body: body.reason || 'Your order has been cancelled' };
     }
+    if (body.type === 'rider_cancelled') {
+      return { title: 'Finding another rider', body: body.message || 'Your previous rider cancelled. We are searching for another rider.' };
+    }
     return undefined;
   }
 

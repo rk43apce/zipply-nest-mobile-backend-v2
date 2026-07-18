@@ -563,10 +563,17 @@ export class DispatchService {
     await this.redis.del(`order_lock:${d.order_id}`);
     if (redispatchable.includes(b.reason_code)) {
       await this.dispatches.update(d.id, { status: 'redispatching', redispatch_count: d.redispatch_count + 1, assigned_rider_id: null });
+      // P0 FIX: Notify customer that rider cancelled and we're finding another rider.
+      // Previously, customer was never informed — they kept seeing the old rider.
+      await this.notifyOrder({ order_id: d.order_id, event_type: 'rider_cancelled', rider_id: b.rider_id, description: 'Rider cancelled. Finding another rider.' });
+      this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'searching', message: 'rider_cancelled', reason: b.reason_code });
       await this.offerPhase(d.id, [b.rider_id]);
       return { cancelled: true, redispatching: true, redispatch_attempt: d.redispatch_count + 1, max_attempts: 3, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Assigning a better-suited rider...' };
     }
     await this.dispatches.update(d.id, { status: 'cancelled', cancelled_at: new Date() });
+    // P0 FIX: Notify customer about terminal cancellation.
+    await this.notifyOrder({ order_id: d.order_id, event_type: 'order_cancelled', rider_id: b.rider_id, description: `Rider cancelled: ${b.reason_code}` });
+    this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'cancelled', message: 'rider_cancelled', reason: b.reason_code });
     return { cancelled: true, redispatching: false, order_cancelled: true, reason: b.reason_code, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Order cancelled. Full refund issued.' };
   }
 

@@ -777,6 +777,52 @@ export class DispatchService {
     if (!d || d.assigned_rider_id !== riderId) throw new ApiError('ORDER_NOT_ASSIGNED', 'Rider is not assigned to this order', HttpStatus.NOT_FOUND);
     return d;
   }
+
+  /// Auto-cancel dispatches that have been searching for too long without assignment.
+  /// Called every 10 seconds by TimeoutProcessor.
+  async autoExpireDispatches() {
+    const DISPATCH_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
+    const staleDispatches = await this.dispatches.find({
+      where: [
+        { status: 'searching' },
+        { status: 'offered' },
+        { status: 'no_rider' },
+        { status: 'redispatching' },
+      ],
+      take: 20,
+    });
+
+    for (const d of staleDispatches) {
+      const age = Date.now() - d.started_at.getTime();
+      if (age < DISPATCH_TIMEOUT_MS) continue;
+
+      // Dispatch has exceeded timeout — cancel it
+      this.logDispatch('dispatch_auto_expired', {
+        dispatch_id: d.id,
+        order_id: d.order_id,
+        customer_id: d.customer_id,
+        status: d.status,
+        age_seconds: Math.round(age / 1000),
+        phase: d.phase,
+        riders_offered: d.riders_offered_count,
+        riders_rejected: d.riders_rejected_count,
+      });
+
+      await this.cancelDispatch(d, 'search_timeout');
+
+      // Update customer order to cancelled with clear reason
+      try {
+        await this.customerOrders.update(
+          { order_id: d.order_id },
+          { status: 'cancelled', cancel_reason: 'No rider available within 3 minutes', cancelled_at: new Date() },
+        );
+        // Notify customer
+        await this.notifyOrder({ order_id: d.order_id, event_type: 'order_cancelled', description: 'No rider found. Order auto-cancelled.' });
+      } catch {
+        // Best-effort — dispatch is already cancelled
+      }
+    }
+  }
   private async reconcileRiderStatus(riderId: string, existing?: Record<string, string>): Promise<Record<string, string>> {
     const key = `rider:status:${riderId}`;
     const st = existing || await this.redis.hgetall(key);

@@ -213,6 +213,15 @@ export class OrdersService {
       await this.notifyCustomer(order.customer_id, { type: 'rider_cancelled', order_id: order.order_id, message: 'Your rider cancelled. We are finding another rider.' });
       return;
     }
+    // Handle auto-cancellation from dispatch timeout
+    if (event.event_type === 'order_cancelled') {
+      if (order.status === 'cancelled') return; // Already cancelled
+      await this.orders.update(order.id, { status: 'cancelled', cancelled_at: new Date(), cancel_reason: event.description || 'No rider found' });
+      await this.events.save({ order_id: order.order_id, event_type: 'order_cancelled', title: 'Order Cancelled', description: event.description || 'No rider available' });
+      this.logOrder('customer_order_status_updated', { order_id: order.order_id, customer_id: order.customer_id, order_status: 'cancelled', event_type: 'order_cancelled' });
+      await this.notifyCustomer(order.customer_id, { type: 'order_cancelled', order_id: order.order_id, reason: event.description || 'No rider found' });
+      return;
+    }
     if (event.event_type === 'delivered') {
       patch.status = 'delivered'; patch.delivered_at = new Date();
       await this.dataSource.transaction(async manager => {

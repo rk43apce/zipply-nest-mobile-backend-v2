@@ -56,6 +56,8 @@ export class TimeoutProcessor implements OnModuleInit {
   constructor(private dispatch: DispatchService) {}
   async onModuleInit() {
     setInterval(() => this.dispatch.expireOffers().catch(() => undefined), 2000);
+    // Auto-cancel dispatches that have been searching for > 3 minutes with no assignment
+    setInterval(() => this.dispatch.autoExpireDispatches().catch(() => undefined), 10000);
   }
 }
 

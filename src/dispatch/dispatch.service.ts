@@ -255,6 +255,12 @@ export class DispatchService {
     if (movedKm < 0.03 && elapsedMs < 15000) {
       await this.redis.hset(`rider:status:${b.rider_id}`, { city: b.city, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? '', gps_timestamp: location.gps_timestamp ?? '', last_seen: now });
       this.logDispatch('ZipplyRedisUpdatedRiderLocation', { rider_id: b.rider_id, redis_key: `rider:status:${b.rider_id}`, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, updated_at: now, skipped_heavy_update: true });
+      // P0 FIX: Even on light updates (rider hasn't moved much), still try to
+      // match waiting dispatches. The rider is confirmed alive and available —
+      // new orders placed since the last update need to find them immediately.
+      if (clean.status === 'available' && !clean.current_order_id) {
+        await this.offerWaitingDispatches();
+      }
       return { updated_at: now, lat: location.lat, lng: location.lng, accuracy: location.accuracy ?? null, gps_timestamp: location.gps_timestamp ?? null, skipped_heavy_update: true };
     }
     await this.redis.geoadd(onlineRidersGeoKey, location.lng, location.lat, b.rider_id);
@@ -267,18 +273,23 @@ export class DispatchService {
   }
 
   async start(b: any) {
+    const startedAt = Date.now();
     const distance = haversineKm(b.pickup.lat, b.pickup.lng, b.dropoff.lat, b.dropoff.lng);
     const weightKg = Number(b.order_meta?.parcel_weight_kg || 2);
     const weightSurcharge = weightKg > 5 ? Math.round((weightKg - 5) * 1500) : 0;
     const estimated = 4000 + Math.round(distance * 1000) + weightSurcharge;
-    this.logDispatch('dispatch_start_received', { order_id: b.order_id, customer_id: b.customer_id, city: b.city, pickup: b.pickup, dropoff: b.dropoff, parcel_weight_kg: weightKg, distance_km: distance });
+    this.logDispatch('dispatch_start_received', { order_id: b.order_id, customer_id: b.customer_id, city: b.city, pickup: b.pickup, dropoff: b.dropoff, parcel_weight_kg: weightKg, distance_km: distance, timestamp: new Date().toISOString() });
     const d = await this.dispatches.save({ order_id: b.order_id, city: b.city, pickup_lat: b.pickup.lat, pickup_lng: b.pickup.lng, pickup_address: b.pickup.address, pickup_contact_name: b.pickup.contact_name, pickup_contact_phone: b.pickup.contact_phone, dropoff_lat: b.dropoff.lat, dropoff_lng: b.dropoff.lng, dropoff_address: b.dropoff.address, dropoff_contact_name: b.dropoff.contact_name, dropoff_contact_phone: b.dropoff.contact_phone, customer_id: b.customer_id, parcel_weight_kg: b.order_meta?.parcel_weight_kg || 2, requires_heavy_vehicle: !!b.order_meta?.requires_heavy_vehicle, special_notes: b.order_meta?.special_notes, distance_km: distance, estimated_earnings: estimated, status: 'searching', phase: 1 });
     await this.events.save({ dispatch_id: d.id, order_id: d.order_id, event_type: 'dispatch_started', phase: 1 });
+    const dbSavedAt = Date.now();
     await this.offerPhase(d.id, []);
+    const offerPhaseCompletedAt = Date.now();
+    this.logDispatch('dispatch_start_completed', { order_id: b.order_id, dispatch_id: d.id, total_ms: offerPhaseCompletedAt - startedAt, db_save_ms: dbSavedAt - startedAt, offer_phase_ms: offerPhaseCompletedAt - dbSavedAt });
     return { dispatch_id: d.id, order_id: d.order_id, status: 'searching', phase: 1, search_radius_km: 2.0, estimated_assignment_seconds: 90 };
   }
 
   async offerPhase(dispatchId: string, excluded: string[] = []) {
+    const phaseStartedAt = Date.now();
     const d = await this.dispatches.findOneBy({ id: dispatchId });
     if (!d || ['assigned', 'delivered', 'cancelled'].includes(d.status)) return;
     this.logDispatch('offer_phase_started', { dispatch_id: dispatchId, order_id: d.order_id, phase: d.phase, excluded_riders: excluded });
@@ -290,8 +301,10 @@ export class DispatchService {
     const [radius, limit, configuredTimeout] = phaseConfig[d.phase] || [];
     const timeout = testOfferTimeoutSeconds || configuredTimeout;
     if (!radius) { this.logDispatch('offer_phase_exhausted', { dispatch_id: d.id, order_id: d.order_id, phase: d.phase }); await this.dispatches.update(d.id, { status: 'no_rider' }); return; }
+    const geoSearchStartedAt = Date.now();
     const nearby = await this.redis.geosearch(onlineRidersGeoKey, 'FROMLONLAT', Number(d.pickup_lng), Number(d.pickup_lat), 'BYRADIUS', radius, 'km', 'ASC', 'COUNT', limit * 4);
-    this.logDispatch('candidate_riders_found', { dispatch_id: d.id, order_id: d.order_id, phase: d.phase, radius_km: radius, candidate_count: nearby.length, candidate_riders: nearby });
+    const geoSearchMs = Date.now() - geoSearchStartedAt;
+    this.logDispatch('candidate_riders_found', { dispatch_id: d.id, order_id: d.order_id, phase: d.phase, radius_km: radius, candidate_count: nearby.length, candidate_riders: nearby, geo_search_ms: geoSearchMs });
     const selected: string[] = [];
     for (const riderId of nearby as string[]) {
       if (excluded.includes(riderId)) {
@@ -330,6 +343,8 @@ export class DispatchService {
       await this.redis.set(`offer:timer:${offer.id}`, riderId, 'EX', timeout);
       await this.flashOfferToRider(riderId, d, offer);
     }
+    const offerPhaseMs = Date.now() - phaseStartedAt;
+    this.logDispatch('offer_phase_completed', { dispatch_id: d.id, order_id: d.order_id, phase: d.phase, riders_offered: selected.length, total_ms: offerPhaseMs });
     this.gateway.emitToCustomer(d.customer_id, 'rider_offer_sent', {
       order_id: d.order_id,
       status: 'offered',
@@ -575,7 +590,18 @@ export class DispatchService {
     await this.riders.increment({ id: b.rider_id }, 'total_deliveries', 1);
     await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '', last_seen: now.toISOString() });
     await this.redis.del(`order_lock:${d.order_id}`);
+    // P0 FIX: Re-add rider to geo-index so they are immediately findable for next dispatch.
+    // Without this, rider stays at their last heavy-update position which may be stale.
+    const riderLoc = await this.redis.hgetall(`rider:status:${b.rider_id}`);
+    if (riderLoc.lat && riderLoc.lng) {
+      await this.redis.geoadd(onlineRidersGeoKey, Number(riderLoc.lng), Number(riderLoc.lat), b.rider_id);
+    }
     const order = await this.customerOrders.findOneBy({ order_id: d.order_id });
+    this.logDispatch('rider_available_after_delivery', { rider_id: b.rider_id, order_id: d.order_id, status: 'available', lat: riderLoc.lat, lng: riderLoc.lng });
+    // P0 FIX: Immediately try to match this rider with any waiting orders.
+    // Previously, the rider had to wait for their next location heartbeat before
+    // pending orders would discover them — causing 20+ second delays.
+    await this.offerWaitingDispatches();
     return this.deliveredPayload(d, now, total, duration, wait, order);
   }
 
@@ -789,10 +815,12 @@ export class DispatchService {
     }
   }
   private async flashOfferToRider(riderId: string, d: OrderDispatch, offer: DispatchOffer) {
+    const fcmStartedAt = Date.now();
     const payload = this.offerPayload(d, offer);
     const rider = await this.riders.findOneBy({ id: riderId });
     const fcmResult = await this.notifications.sendOrderOffer(rider?.fcm_token, payload);
-    this.logDispatch('fcm_offer_flash_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, fcm_attempted: fcmResult.attempted, fcm_sent: fcmResult.sent, reason: fcmResult.reason, error: fcmResult.error, message_id: fcmResult.message_id });
+    const fcmCompletedAt = Date.now();
+    this.logDispatch('fcm_offer_flash_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, fcm_attempted: fcmResult.attempted, fcm_sent: fcmResult.sent, reason: fcmResult.reason, error: fcmResult.error, message_id: fcmResult.message_id, fcm_latency_ms: fcmCompletedAt - fcmStartedAt, has_token: !!rider?.fcm_token, token_suffix: rider?.fcm_token?.slice(-6) });
     if (this.shouldEmitSocket(fcmResult)) {
       const emitResult = this.gateway.emitToRider(riderId, 'order_offer', payload);
       this.logDispatch('socket_emit_attempted', { dispatch_id: d.id, order_id: d.order_id, offer_id: offer.id, rider_id: riderId, event: 'order_offer', ...emitResult });

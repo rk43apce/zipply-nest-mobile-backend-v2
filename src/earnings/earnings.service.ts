@@ -11,7 +11,13 @@ export class EarningsService {
     const rider = await this.riders.findOneBy({ id: riderId });
     const today = await this.sum(riderId, this.startOfDay(0), this.endOfDay(0));
     const week = await this.sum(riderId, this.startOfDay(6), this.endOfDay(0));
-    return { today: { total: today.total, display_total: money(today.total), deliveries: today.deliveries, online_hours: 0 }, week: { total: week.total, display_total: money(week.total), deliveries: week.deliveries }, stats: { rating: Number(rider?.rating || 0), acceptance_rate: Number(rider?.acceptance_rate || 0), total_deliveries: rider?.total_deliveries || 0 } };
+    return {
+      today: { total: today.total, display_total: money(today.total), deliveries: today.deliveries, online_hours: null },
+      week: { total: week.total, display_total: money(week.total), deliveries: week.deliveries },
+      stats: { rating: Number(rider?.rating || 0), acceptance_rate: Number(rider?.acceptance_rate || 0), total_deliveries: rider?.total_deliveries || 0 },
+      incentives: [],
+      demand_guidance: { status: 'unavailable', message: 'Live demand guidance is not available in your area yet.' }
+    };
   }
   async list(riderId: string, period: string) {
     const days = period === 'today' ? 1 : period === 'month' ? 30 : 7;

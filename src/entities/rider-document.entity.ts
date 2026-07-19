@@ -11,8 +11,9 @@ export class RiderDocument {
   @Column({ nullable: true, length: 50 }) mime_type?: string;
   @Column({ length: 20, default: 'accepted' }) upload_status: string;
   @Column({ length: 20, default: 'pending' }) verification_status: string;
-  @Column({ nullable: true, length: 255 }) failure_reason?: string;
-  @Column({ type: 'timestamp', nullable: true }) verified_at?: Date;
+  @Column({ nullable: true, length: 255 }) failure_reason?: string | null;
+  @Column({ type: 'timestamp', nullable: true }) verified_at?: Date | null;
+  @Column({ type: 'date', nullable: true }) expires_at?: Date | null;
   @CreateDateColumn({ type: 'timestamp' }) created_at: Date;
   @UpdateDateColumn({ type: 'timestamp' }) updated_at: Date;
 }

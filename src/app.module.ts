@@ -15,6 +15,7 @@ import { OrdersModule } from './orders/orders.module';
 import { AdminModule } from './admin/admin.module';
 import { entities } from './entities';
 import { SessionValidationMiddleware } from './auth/session-validation.middleware';
+import { SupportModule } from './support/support.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { SessionValidationMiddleware } from './auth/session-validation.middlewar
     WalletModule,
     OrdersModule,
     AdminModule,
+    SupportModule,
     WorkersModule
   ]
 })

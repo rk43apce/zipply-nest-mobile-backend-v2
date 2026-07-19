@@ -50,7 +50,7 @@ export class RiderService {
   async uploadDocument(riderId: string, type: string, file?: Express.Multer.File) {
     if (!documentTypes.includes(type as any) || !file) throw new ApiError('DOCUMENT_INVALID', 'Invalid document', HttpStatus.UNPROCESSABLE_ENTITY);
     if (!['image/jpeg', 'image/png', 'application/pdf'].includes(file.mimetype)) throw new ApiError('DOCUMENT_INVALID', 'Invalid format', HttpStatus.UNPROCESSABLE_ENTITY);
-    await this.docs.upsert({ rider_id: riderId, document_type: type, file_url: `/uploads/${file.filename}`, file_name: file.originalname, file_size_bytes: file.size, mime_type: file.mimetype, upload_status: 'accepted', verification_status: 'pending' }, ['rider_id', 'document_type']);
+    await this.docs.upsert({ rider_id: riderId, document_type: type, file_url: `/uploads/${file.filename}`, file_name: file.originalname, file_size_bytes: file.size, mime_type: file.mimetype, upload_status: 'accepted', verification_status: 'pending', failure_reason: null, verified_at: null, expires_at: null }, ['rider_id', 'document_type']);
     const checklist = await this.checklist(riderId);
     return { document_type: type, upload_status: 'accepted', verification_status: 'pending', file_url: `/uploads/${file.filename}`, checklist: checklist.checklist, all_uploaded: checklist.uploaded_count === 4, uploaded_count: checklist.uploaded_count, total_required: 4 };
   }
@@ -67,7 +67,7 @@ export class RiderService {
     const rider = await this.mustRider(riderId);
     const docs = await this.docs.find({ where: { rider_id: riderId }, order: { created_at: 'ASC' } });
     const verified = docs.filter(d => d.verification_status === 'verified').length;
-    return { documents: docs.map(d => ({ document_type: d.document_type, upload_status: d.upload_status, verification_status: d.verification_status, file_url: d.file_url, failure_reason: d.failure_reason, uploaded_at: d.created_at })), all_verified: verified === 4, verified_count: verified, onboarding_status: rider.onboarding_status };
+    return { documents: docs.map(d => ({ document_type: d.document_type, upload_status: d.upload_status, verification_status: d.verification_status, file_url: d.file_url, failure_reason: d.failure_reason, uploaded_at: d.created_at, verified_at: d.verified_at || null, expires_at: d.expires_at || null })), all_verified: verified === 4, verified_count: verified, onboarding_status: rider.onboarding_status };
   }
 
   async initiateBackground(riderId: string) {

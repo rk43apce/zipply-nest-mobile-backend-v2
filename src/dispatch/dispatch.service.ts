@@ -101,6 +101,11 @@ export class DispatchService {
     const displayPlatformFee = b?.display_platform_fee?.toString() || '₹5.00';
     const now = new Date();
     const expiresAt = new Date(now.getTime() + timeoutSeconds * 1000).toISOString();
+    const pickupApproach = await this.pickupApproachForRider(
+      riderId,
+      Number(b?.pickup_lat ?? 19.076),
+      Number(b?.pickup_lng ?? 72.8777),
+    );
 
     const payload = {
       offer_id: offerId,
@@ -123,6 +128,7 @@ export class DispatchService {
         contact_phone_masked: b?.dropoff_contact_phone_masked?.toString() || '******9999',
       },
       distance_km: Number(b?.distance_km ?? 2.4),
+      ...pickupApproach,
       estimated_earnings: Number(b?.estimated_earnings ?? 2500),
       display_earnings: displayEarnings,
       customer_fare: Number(b?.customer_fare ?? 3000),
@@ -538,28 +544,51 @@ export class DispatchService {
     return { offer_id: offerId, rider_id: riderId, acked: true };
   }
 
-  async transition(orderId: string, riderId: string, from: string | string[], to: string) {
+  async transition(orderId: string, riderId: string, from: string | string[], to: string, idempotencyKey?: string) {
     // Block picked_up transition through generic endpoint — must use OTP verification endpoint
     if (to === 'picked_up') {
       throw new ApiError('OTP_REQUIRED', 'Pickup confirmation requires OTP verification. Use POST /api/dispatch/verify-pickup-otp instead.', HttpStatus.UNPROCESSABLE_ENTITY);
     }
-    const d = await this.mustAssigned(orderId, riderId);
-    if (d.status === to) return { order_id: orderId, status: to, already_applied: true };
-    if (!(Array.isArray(from) ? from : [from]).includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot transition from current delivery state', HttpStatus.CONFLICT);
-    const now = new Date();
-    const patch: any = { status: to };
-    if (to === 'en_route_pickup') patch.en_route_at = now;
-    if (to === 'arrived_pickup') patch.arrived_pickup_at = now;
-    if (to === 'in_transit') patch.in_transit_at = now;
-    await this.dispatches.update(d.id, patch);
-    await this.events.save({ dispatch_id: d.id, order_id: orderId, event_type: to, rider_id: riderId });
-    await this.notifyOrder({ order_id: orderId, event_type: to, rider_id: riderId });
-    this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: orderId, status: to, message: to });
-    const messages: any = { en_route_pickup: { message: 'Rider is heading to pickup', customer_message: 'Your rider is heading to pick up your order!' }, arrived_pickup: { arrival_recorded_at: now, customer_notified: true, wait_timeout_minutes: 10, message: 'Waiting for parcel. Customer has been notified.' }, in_transit: { customer_message: 'Your order is on the way!' } };
-    return { order_id: orderId, status: to, ...messages[to] };
+    const cacheKey = idempotencyKey ? `dispatch:transition:idempotency:${riderId}:${idempotencyKey}` : '';
+    if (cacheKey) {
+      const cached = await this.redis.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    }
+    const lockKey = `dispatch:transition:lock:${orderId}:${to}`;
+    const acquired = await this.redis.set(lockKey, riderId, 'EX', 30, 'NX');
+    if (!acquired) throw new ApiError('TRANSITION_IN_PROGRESS', 'Delivery status update is already in progress', HttpStatus.CONFLICT);
+    try {
+      const d = await this.mustAssigned(orderId, riderId);
+      if (d.status === to) return { order_id: orderId, status: to, already_applied: true };
+      if (!(Array.isArray(from) ? from : [from]).includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot transition from current delivery state', HttpStatus.CONFLICT);
+      const now = new Date();
+      const patch: any = { status: to };
+      if (to === 'en_route_pickup') patch.en_route_at = now;
+      if (to === 'arrived_pickup') patch.arrived_pickup_at = now;
+      if (to === 'in_transit') patch.in_transit_at = now;
+      await this.dispatches.update(d.id, patch);
+      await this.events.save({ dispatch_id: d.id, order_id: orderId, event_type: to, rider_id: riderId });
+      await this.notifyOrder({ order_id: orderId, event_type: to, rider_id: riderId });
+      this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: orderId, status: to, message: to });
+      const messages: any = { en_route_pickup: { message: 'Rider is heading to pickup', customer_message: 'Your rider is heading to pick up your order!' }, arrived_pickup: { arrival_recorded_at: now, customer_notified: true, wait_timeout_minutes: 10, message: 'Waiting for parcel. Customer has been notified.' }, in_transit: { customer_message: 'Your order is on the way!' } };
+      const response = { order_id: orderId, status: to, ...messages[to] };
+      if (cacheKey) await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
+      return response;
+    } finally {
+      if ((await this.redis.get(lockKey)) === riderId) await this.redis.del(lockKey);
+    }
   }
 
   async cancelPickup(b: any) {
+    const cacheKey = b.idempotency_key ? `dispatch:cancel:idempotency:${b.rider_id}:${b.idempotency_key}` : '';
+    if (cacheKey) {
+      const cached = await this.redis.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    }
+    const lockKey = `dispatch:cancel:lock:${b.order_id}`;
+    const acquired = await this.redis.set(lockKey, b.rider_id, 'EX', 30, 'NX');
+    if (!acquired) throw new ApiError('CANCELLATION_IN_PROGRESS', 'Cancellation is already in progress', HttpStatus.CONFLICT);
+    try {
     const redispatchable = ['oversized', 'overweight', 'vehicle_breakdown', 'safety_concern', 'long_wait', 'customer_unreachable'];
     const terminal = ['store_closed', 'item_unavailable'];
     if (![...redispatchable, ...terminal, 'other'].includes(b.reason_code)) throw new ApiError('INVALID_REASON_CODE', 'Invalid reason code', HttpStatus.UNPROCESSABLE_ENTITY);
@@ -568,29 +597,49 @@ export class DispatchService {
     if (d.redispatch_count >= 3) throw new ApiError('MAX_REDISPATCH_REACHED', 'Maximum redispatch attempts reached', HttpStatus.CONFLICT);
     const comp = b.reason_code === 'other' ? 0 : 1500;
     if (comp) await this.earnings.save({ rider_id: b.rider_id, order_id: d.order_id, dispatch_id: d.id, earning_type: 'cancellation_compensation', total: comp });
-    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '' });
-    await this.redis.del(`order_lock:${d.order_id}`);
     if (redispatchable.includes(b.reason_code)) {
       await this.dispatches.update(d.id, { status: 'redispatching', redispatch_count: d.redispatch_count + 1, assigned_rider_id: null });
+      await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '' });
+      await this.redis.del(`order_lock:${d.order_id}`);
+      const response = { cancelled: true, redispatching: true, redispatch_attempt: d.redispatch_count + 1, max_attempts: 3, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Assigning a better-suited rider...' };
+      if (cacheKey) await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
       // P0 FIX: Notify customer that rider cancelled and we're finding another rider.
       // Previously, customer was never informed — they kept seeing the old rider.
       await this.notifyOrder({ order_id: d.order_id, event_type: 'rider_cancelled', rider_id: b.rider_id, description: 'Rider cancelled. Finding another rider.' });
       this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'searching', message: 'rider_cancelled', reason: b.reason_code });
-      await this.offerPhase(d.id, [b.rider_id]);
-      return { cancelled: true, redispatching: true, redispatch_attempt: d.redispatch_count + 1, max_attempts: 3, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Assigning a better-suited rider...' };
+      try { await this.offerPhase(d.id, [b.rider_id]); } catch (error) { this.logDispatch('cancel_redispatch_start_failed', { order_id: d.order_id, rider_id: b.rider_id, error: error instanceof Error ? error.message : String(error) }); }
+      return response;
     }
     await this.dispatches.update(d.id, { status: 'cancelled', cancelled_at: new Date() });
+    await this.redis.hset(`rider:status:${b.rider_id}`, { status: 'available', current_order_id: '' });
+    await this.redis.del(`order_lock:${d.order_id}`);
+    const response = { cancelled: true, redispatching: false, order_cancelled: true, reason: b.reason_code, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Order cancelled. Full refund issued.' };
+    if (cacheKey) await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
     // P0 FIX: Notify customer about terminal cancellation.
     await this.notifyOrder({ order_id: d.order_id, event_type: 'order_cancelled', rider_id: b.rider_id, description: `Rider cancelled: ${b.reason_code}` });
     this.gateway.emitToCustomer(d.customer_id, 'dispatch_update', { order_id: d.order_id, status: 'cancelled', message: 'rider_cancelled', reason: b.reason_code });
-    return { cancelled: true, redispatching: false, order_cancelled: true, reason: b.reason_code, rider_compensation: comp, display_compensation: money(comp), customer_message: 'Order cancelled. Full refund issued.' };
+    return response;
+    } finally {
+      if ((await this.redis.get(lockKey)) === b.rider_id) await this.redis.del(lockKey);
+    }
   }
 
   async delivered(b: any) {
+    const cacheKey = b.idempotency_key ? `dispatch:delivered:idempotency:${b.rider_id}:${b.idempotency_key}` : '';
+    if (cacheKey) {
+      const cached = await this.redis.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    }
+    const lockKey = `dispatch:delivered:lock:${b.order_id}`;
+    const acquired = await this.redis.set(lockKey, b.rider_id, 'EX', 60, 'NX');
+    if (!acquired) throw new ApiError('DELIVERY_COMPLETION_IN_PROGRESS', 'Delivery completion is already in progress', HttpStatus.CONFLICT);
+    try {
     const d = await this.mustAssigned(b.order_id, b.rider_id);
     if (d.status === 'delivered') {
       const completedOrder = await this.customerOrders.findOneBy({ order_id: d.order_id });
-      return this.deliveredPayload(d, d.delivered_at || new Date(), d.estimated_earnings, null, 0, completedOrder);
+      const response = this.deliveredPayload(d, d.delivered_at || new Date(), d.estimated_earnings, null, 0, completedOrder);
+      if (cacheKey) await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
+      return response;
     }
     if (!(await this.isCustomerOrderDispatchable(d))) throw new ApiError('ORDER_NOT_ACTIVE', 'Customer order is not active', HttpStatus.CONFLICT);
     if (!['in_transit', 'picked_up'].includes(d.status)) throw new ApiError('INVALID_STATE', 'Cannot deliver in current delivery state', HttpStatus.CONFLICT);
@@ -618,7 +667,12 @@ export class DispatchService {
     // Previously, the rider had to wait for their next location heartbeat before
     // pending orders would discover them — causing 20+ second delays.
     await this.offerWaitingDispatches();
-    return this.deliveredPayload(d, now, total, duration, wait, order);
+    const response = this.deliveredPayload(d, now, total, duration, wait, order);
+    if (cacheKey) await this.redis.set(cacheKey, JSON.stringify(response), 'EX', 86400);
+    return response;
+    } finally {
+      if ((await this.redis.get(lockKey)) === b.rider_id) await this.redis.del(lockKey);
+    }
   }
 
   async cancelOrderDispatch(orderId: string, reason = 'customer_cancelled') {
@@ -878,7 +932,7 @@ export class DispatchService {
   }
   private async flashOfferToRider(riderId: string, d: OrderDispatch, offer: DispatchOffer) {
     const fcmStartedAt = Date.now();
-    const payload = this.offerPayload(d, offer);
+    const payload = await this.offerPayload(d, offer);
     const rider = await this.riders.findOneBy({ id: riderId });
     const fcmResult = await this.notifications.sendOrderOffer(rider?.fcm_token, payload);
     const fcmCompletedAt = Date.now();
@@ -937,11 +991,23 @@ export class DispatchService {
   private sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
-  private offerPayload(d: OrderDispatch, o: DispatchOffer) {
+  private async offerPayload(d: OrderDispatch, o: DispatchOffer) {
     const platformFee = 500;
     const riderEarnings = d.estimated_earnings || 0;
     const customerFare = riderEarnings + platformFee;
-    return { type: 'order_offer', offer_id: o.id, order_id: d.order_id, order_reference: this.displayOrderReference(d.order_id), offer_created_at: o.offered_at, offer_expires_at: o.expires_at, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: riderEarnings, display_earnings: money(riderEarnings), customer_fare: customerFare, display_customer_fare: money(customerFare), platform_fee: platformFee, display_platform_fee: money(platformFee), timeout_seconds: o.timeout_seconds, expires_at: o.expires_at, server_sent_at: new Date(), special_notes: d.special_notes, parcel_weight_kg: Number(d.parcel_weight_kg) };
+    const pickupApproach = await this.pickupApproachForRider(o.rider_id, Number(d.pickup_lat), Number(d.pickup_lng));
+    return { type: 'order_offer', offer_id: o.id, order_id: d.order_id, order_reference: this.displayOrderReference(d.order_id), offer_created_at: o.offered_at, offer_expires_at: o.expires_at, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), ...pickupApproach, estimated_earnings: riderEarnings, display_earnings: money(riderEarnings), customer_fare: customerFare, display_customer_fare: money(customerFare), platform_fee: platformFee, display_platform_fee: money(platformFee), timeout_seconds: o.timeout_seconds, expires_at: o.expires_at, server_sent_at: new Date(), special_notes: d.special_notes, parcel_weight_kg: Number(d.parcel_weight_kg) };
+  }
+  private async pickupApproachForRider(riderId: string, pickupLat: number, pickupLng: number) {
+    if (!riderId || !hasValidCoordinates(pickupLat, pickupLng)) return {};
+    const riderStatus = await this.redis.hgetall(`rider:status:${riderId}`);
+    const riderLat = Number(riderStatus.lat);
+    const riderLng = Number(riderStatus.lng);
+    if (!hasValidCoordinates(riderLat, riderLng)) return {};
+    const pickupDistanceKm = Math.round(haversineKm(riderLat, riderLng, pickupLat, pickupLng) * 100) / 100;
+    // Estimated approach time until road-routing ETA is available.
+    const pickupEtaMinutes = Math.max(1, Math.min(60, Math.ceil((pickupDistanceKm / 20) * 60)));
+    return { pickup_distance_km: pickupDistanceKm, pickup_eta_minutes: pickupEtaMinutes, pickup_distance_source: 'live_gps_estimate', pickup_distance_calculated_at: new Date().toISOString() };
   }
   private displayOrderReference(orderId: string) {
     let hash = 2166136261;
@@ -953,7 +1019,7 @@ export class DispatchService {
   }
   private deliveredPayload(d: OrderDispatch, deliveredAt: Date, total = d.estimated_earnings || 0, duration: number | null = null, wait = 0, order?: CustomerOrder | null) {
     const distanceBonus = Math.max(0, total - 4000);
-    return { order_id: d.order_id, delivered_at: deliveredAt, earnings: { base_fare: 4000, distance_bonus: distanceBonus, surge_bonus: 0, total, display_total: money(total) }, trip_summary: { distance_km: Number(d.distance_km), duration_minutes: duration, pickup_wait_minutes: wait }, rider_status_after: 'available', customer_notified: true, payment_method: order?.payment_method || 'prepaid', cash_confirmation: order?.payment_method === 'cash' ? { cash_amount: Number(order.total_amount), display_cash_amount: money(Number(order.total_amount)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)) } : null };
+    return { order_id: d.order_id, delivered_at: deliveredAt, earnings: { base_fare: 4000, distance_bonus: distanceBonus, surge_bonus: 0, total, display_total: money(total) }, trip_summary: { distance_km: Number(d.distance_km), duration_minutes: duration, pickup_wait_minutes: wait }, rider_status_after: 'available', customer_notified: true, payment_method: order?.payment_method || 'prepaid', cash_confirmation: order?.payment_method === 'cash' ? { cash_amount: Number(order.total_amount), display_cash_amount: money(Number(order.total_amount)), wallet_debit_amount: Number(order.platform_fee), display_wallet_debit: money(Number(order.platform_fee)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)) } : null };
   }
   private assignmentPayload(d: OrderDispatch, o: DispatchOffer) { return { assigned: true, order_id: d.order_id, offer_id: o.id, dispatch_id: d.id, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}` }; }
   private activeDelivery(d: OrderDispatch) { return { order_id: d.order_id, dispatch_id: d.id, delivery_status: d.status, pickup: { lat: Number(d.pickup_lat), lng: Number(d.pickup_lng), address: d.pickup_address, contact_name: d.pickup_contact_name, contact_phone: d.pickup_contact_phone }, dropoff: { lat: Number(d.dropoff_lat), lng: Number(d.dropoff_lng), address: d.dropoff_address, contact_name: d.dropoff_contact_name, contact_phone_masked: maskPhone(d.dropoff_contact_phone) }, distance_km: Number(d.distance_km), estimated_earnings: d.estimated_earnings, special_notes: d.special_notes, navigation_url: `https://maps.google.com/?q=${d.pickup_lat},${d.pickup_lng}`, assigned_at: d.assigned_at }; }

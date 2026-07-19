@@ -14,11 +14,11 @@ export class DispatchController {
   @Post('reject') reject(@Body() b: any) { return this.dispatch.reject(b.offer_id, b.rider_id, b.reason); }
   @Post('offer-ack') offerAck(@Body() b: any) { return this.dispatch.offerAck(b.offer_id, b.rider_id, b.source, b.received_at); }
   @Post('test-fcm') testFcm(@Body() b: any) { return this.dispatch.testFcm(b); }
-  @Post('en-route-pickup') enRoute(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'assigned', 'en_route_pickup'); }
-  @Post('arrived-pickup') arrived(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, ['assigned', 'en_route_pickup'], 'arrived_pickup'); }
-  @Post('picked-up') picked(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'arrived_pickup', 'picked_up'); }
+  @Post('en-route-pickup') enRoute(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'assigned', 'en_route_pickup', b.idempotency_key); }
+  @Post('arrived-pickup') arrived(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, ['assigned', 'en_route_pickup'], 'arrived_pickup', b.idempotency_key); }
+  @Post('picked-up') picked(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'arrived_pickup', 'picked_up', b.idempotency_key); }
   @Post('verify-pickup-otp') verifyPickupOtp(@Body() b: any) { return this.dispatch.verifyPickupOtp(b.order_id, b.rider_id, b.otp); }
-  @Post('in-transit') transit(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'picked_up', 'in_transit'); }
+  @Post('in-transit') transit(@Body() b: any) { return this.dispatch.transition(b.order_id, b.rider_id, 'picked_up', 'in_transit', b.idempotency_key); }
   @Post('cancel-pickup') cancel(@Body() b: any) { return this.dispatch.cancelPickup(b); }
   @Post('delivered') delivered(@Body() b: any) { return this.dispatch.delivered(b); }
   @Get('validate-offer') validateOffer(@Query('offer_id') offerId: string, @Query('rider_id') riderId: string) { return this.dispatch.validateOffer(offerId, riderId); }

@@ -55,7 +55,7 @@ export class CashPaymentService {
   }
 
   private cashOrderPayload(order: CustomerOrder, newBalance: number) {
-    return { order_id: order.order_id, cash_collected: Number(order.total_amount), display_cash_collected: money(Number(order.total_amount)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)), new_wallet_balance: newBalance, display_new_wallet_balance: money(newBalance), payment_status: 'cash_confirmed' };
+    return { order_id: order.order_id, cash_collected: Number(order.total_amount), display_cash_collected: money(Number(order.total_amount)), wallet_debit_amount: Number(order.platform_fee), display_wallet_debit: money(Number(order.platform_fee)), commission_amount: Number(order.platform_fee), display_commission: money(Number(order.platform_fee)), new_wallet_balance: newBalance, display_new_wallet_balance: money(newBalance), payment_status: 'cash_confirmed' };
   }
 
   // Get active cash trip for a rider

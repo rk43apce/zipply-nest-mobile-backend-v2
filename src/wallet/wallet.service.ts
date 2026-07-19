@@ -79,8 +79,10 @@ export class WalletService {
       return {
         wallet_id: wallet.id,
         rider_id: riderId,
+        wallet_balance: wallet.cached_balance,
         cached_balance: wallet.cached_balance,
         available_balance: wallet.available_balance,
+        display_wallet_balance: money(wallet.cached_balance),
         display_balance: money(wallet.cached_balance),
         display_available: money(wallet.available_balance),
         currency: wallet.currency_code,
